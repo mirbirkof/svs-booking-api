@@ -208,21 +208,279 @@ async function showMainMenu(chatId, name) {
 async function showBranchBritanska(chatId) { return showAdmin(chatId); }
 async function showBranchKharkivska(chatId) { return showAdmin(chatId); }
 
+// ═══ BOOKING FLOW: услуга → дата → время+мастер → подтверждение ═══
+// In-memory state per user for booking flow
+const bookingState = new Map(); // tgUserId → { step, service, date, ... }
+
 async function showBookVisit(chatId) {
+  // Step 1: show service categories
   return tg('sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
-    text:
-      `<b>🗓 Запис на візит</b>\n\n` +
-      `Для запису на процедуру зателефонуйте адміністратору:\n\n` +
-      `📞 +380991283375\n\n` +
-      `Або напишіть нам в Instagram:`,
+    text: '<b>🗓 Запис на візит</b>\n\nОберіть категорію послуг:',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '📸 Написати в Instagram', url: 'https://www.instagram.com/svs_beauty_space/' }],
+        ...CAT_ORDER.map(c => [{ text: CAT_LABEL[c], callback_data: `book:cat:${c}` }]),
+        [{ text: '« Назад', callback_data: 'menu:main' }],
       ],
     },
   });
+}
+
+async function showBookServices(chatId, cat, userId) {
+  try {
+    const allServices = await bp.listServices();
+    const svcArr = Array.isArray(allServices) ? allServices : (allServices.data || allServices.items || []);
+    // Get masters to determine category mapping
+    const allMasters = await bp.listEmployees();
+    const empArr = Array.isArray(allMasters) ? allMasters : (allMasters.data || allMasters.items || []);
+
+    // Build service→category mapping (same logic as /services endpoint)
+    const votes = {};
+    for (const m of empArr) {
+      const positions = m.positions || (m.position ? [m.position] : []);
+      const mCat = positions.map(p => POSITION_TO_CATEGORY[p]).find(Boolean);
+      if (!mCat) continue;
+      for (const s of (m.services || [])) {
+        const sid = s.id || s;
+        votes[sid] = votes[sid] || {};
+        votes[sid][mCat] = (votes[sid][mCat] || 0) + 1;
+      }
+    }
+
+    const filtered = svcArr.filter(svc => {
+      const cid = typeof svc.category === 'string' ? svc.category : (svc.category && svc.category.id);
+      if (cid && CATEGORY_OVERRIDE[cid]) return CATEGORY_OVERRIDE[cid] === cat;
+      const v = votes[svc.id];
+      if (!v) return false;
+      const top = Object.entries(v).sort((a,b) => b[1] - a[1])[0];
+      return top && top[0] === cat;
+    });
+
+    if (!filtered.length) {
+      return tg('sendMessage', { chat_id: chatId, text: 'У цій категорії поки немає доступних послуг.',
+        reply_markup: { inline_keyboard: [[{ text: '« Назад', callback_data: 'book:start' }]] } });
+    }
+
+    // Show services as buttons (max 20)
+    const buttons = filtered.slice(0, 20).map(s => {
+      const price = s.price ? ` — ${s.price} грн` : '';
+      const dur = s.duration ? ` (${s.duration} хв)` : '';
+      return [{ text: `${s.name}${dur}${price}`, callback_data: `book:svc:${s.id}` }];
+    });
+    buttons.push([{ text: '« Назад до категорій', callback_data: 'book:start' }]);
+
+    return tg('sendMessage', {
+      chat_id: chatId, parse_mode: 'HTML',
+      text: `<b>${CAT_LABEL[cat] || cat}</b>\n\nОберіть послугу:`,
+      reply_markup: { inline_keyboard: buttons },
+    });
+  } catch (e) {
+    console.error('[book:services]', e.message);
+    return tg('sendMessage', { chat_id: chatId, text: '❌ Помилка завантаження послуг. Спробуйте пізніше.' });
+  }
+}
+
+async function showBookDates(chatId, serviceId, userId) {
+  try {
+    const services = await bp.listServices();
+    const svc = services.find(s => s.id === serviceId);
+    if (!svc) return tg('sendMessage', { chat_id: chatId, text: 'Послугу не знайдено.' });
+
+    const masters = await mastersForService(serviceId);
+    const masterIds = new Set(masters.map(m => m.id));
+    const dateKeys = buildDateKeys(14);
+
+    const slots = await buildAvailabilityFromSchedule({ duration: svc.duration, masterIds, dateKeys });
+
+    // Find dates with available slots
+    const available = dateKeys.filter(dk => slots[dk] && Object.keys(slots[dk]).length > 0);
+
+    if (!available.length) {
+      return tg('sendMessage', { chat_id: chatId, parse_mode: 'HTML',
+        text: `<b>${svc.name}</b>\n\n😔 На найближчі 14 днів немає вільних вікон.\nЗателефонуйте адміністратору: +380991283375`,
+        reply_markup: { inline_keyboard: [[{ text: '« Назад', callback_data: 'book:start' }]] } });
+    }
+
+    // Save state
+    bookingState.set(userId, { service: svc, serviceId, masters, slots });
+
+    // Show dates as buttons (group by rows of 2)
+    const dayNames = ['Нд','Пн','Вт','Ср','Чт','Пт','Сб'];
+    const monthNames = ['січ','лют','бер','кві','тра','чер','лип','сер','вер','жов','лис','гру'];
+    const buttons = [];
+    let row = [];
+    for (const dk of available) {
+      const d = new Date(dk + 'T12:00:00');
+      const slotCount = Object.keys(slots[dk]).length;
+      const label = `${dayNames[d.getDay()]} ${d.getDate()} ${monthNames[d.getMonth()]} (${slotCount})`;
+      row.push({ text: label, callback_data: `book:date:${dk}` });
+      if (row.length === 2) { buttons.push(row); row = []; }
+    }
+    if (row.length) buttons.push(row);
+    buttons.push([{ text: '« Назад', callback_data: 'book:start' }]);
+
+    return tg('sendMessage', {
+      chat_id: chatId, parse_mode: 'HTML',
+      text: `<b>${svc.name}</b> · ${svc.duration} хв · ${svc.price || '—'} грн\n\nОберіть дату (у дужках — кількість вільних вікон):`,
+      reply_markup: { inline_keyboard: buttons },
+    });
+  } catch (e) {
+    console.error('[book:dates]', e.message);
+    return tg('sendMessage', { chat_id: chatId, text: '❌ Помилка. Спробуйте пізніше.' });
+  }
+}
+
+async function showBookSlots(chatId, dateKey, userId) {
+  const state = bookingState.get(userId);
+  if (!state) return showBookVisit(chatId);
+
+  const daySlots = state.slots[dateKey];
+  if (!daySlots || !Object.keys(daySlots).length) {
+    return tg('sendMessage', { chat_id: chatId, text: 'На цю дату немає вільних вікон.' });
+  }
+
+  state.date = dateKey;
+
+  // Get masters info for display
+  const allMasters = await bp.listEmployees();
+  const empArr = Array.isArray(allMasters) ? allMasters : (allMasters.data || allMasters.items || []);
+  const masterMap = {};
+  empArr.forEach(m => { masterMap[m.id] = m.name || m.id; });
+
+  // Build time+master buttons
+  const times = Object.keys(daySlots).sort();
+  const buttons = [];
+  for (const time of times) {
+    const masterSet = daySlots[time];
+    for (const masterId of masterSet) {
+      const masterName = masterMap[masterId] || 'Майстер';
+      // Shorten name for button
+      const shortName = masterName.split(' ').slice(0, 2).join(' ');
+      buttons.push([{
+        text: `🕐 ${time} — ${shortName}`,
+        callback_data: `book:slot:${dateKey}:${time}:${masterId}`
+      }]);
+    }
+  }
+  // Limit to 30 buttons max
+  const limited = buttons.slice(0, 30);
+  limited.push([{ text: '« Назад до дат', callback_data: `book:svc:${state.serviceId}` }]);
+
+  const d = new Date(dateKey + 'T12:00:00');
+  const dayNames = ['Неділя','Понеділок','Вівторок','Середа','Четвер','Пʼятниця','Субота'];
+
+  return tg('sendMessage', {
+    chat_id: chatId, parse_mode: 'HTML',
+    text: `<b>${state.service.name}</b>\n📅 ${dayNames[d.getDay()]}, ${d.getDate()}.${String(d.getMonth()+1).padStart(2,'0')}\n\nОберіть час та майстра:`,
+    reply_markup: { inline_keyboard: limited },
+  });
+}
+
+async function confirmBooking(chatId, dateKey, time, masterId, userId) {
+  const state = bookingState.get(userId);
+  if (!state) return showBookVisit(chatId);
+
+  const phone = userPhones.get(userId);
+  if (!phone) {
+    // Save pending booking data
+    state.pendingConfirm = { dateKey, time, masterId };
+    bookingState.set(userId, state);
+    return tg('sendMessage', {
+      chat_id: chatId, parse_mode: 'HTML',
+      text: 'Для підтвердження запису поділіться номером телефону:',
+      reply_markup: { keyboard: [[{ text: '📱 Поділитись номером', request_contact: true }]], resize_keyboard: true, one_time_keyboard: true },
+    });
+  }
+
+  // Get master name
+  const allMasters = await bp.listEmployees();
+  const empArr = Array.isArray(allMasters) ? allMasters : (allMasters.data || allMasters.items || []);
+  const master = empArr.find(m => m.id === masterId);
+  const masterName = master ? master.name : 'Майстер';
+
+  const dateFrom = `${dateKey}T${time}:00`;
+  const duration = state.service.duration || 60;
+  const [h, m] = time.split(':').map(Number);
+  const endMin = h * 60 + m + duration;
+  const dateTo = `${dateKey}T${String(Math.floor(endMin/60)).padStart(2,'0')}:${String(endMin%60).padStart(2,'0')}:00`;
+
+  // Show confirmation
+  state.confirm = { dateKey, time, masterId, masterName, dateFrom, dateTo, phone };
+  bookingState.set(userId, state);
+
+  const d = new Date(dateKey + 'T12:00:00');
+  const dayNames = ['Нд','Пн','Вт','Ср','Чт','Пт','Сб'];
+
+  return tg('sendMessage', {
+    chat_id: chatId, parse_mode: 'HTML',
+    text: `<b>Підтвердіть запис:</b>\n\n` +
+      `💇 <b>${state.service.name}</b>\n` +
+      `📅 ${dayNames[d.getDay()]}, ${d.getDate()}.${String(d.getMonth()+1).padStart(2,'0')} о <b>${time}</b>\n` +
+      `👩 Майстер: <b>${masterName}</b>\n` +
+      `⏱ Тривалість: ${duration} хв\n` +
+      (state.service.price ? `💰 Вартість: ${state.service.price} грн\n` : '') +
+      `\nУсе вірно?`,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '✅ Підтвердити запис', callback_data: 'book:confirm:yes' }],
+        [{ text: '❌ Скасувати', callback_data: 'book:start' }],
+      ],
+    },
+  });
+}
+
+async function executeBooking(chatId, userId) {
+  const state = bookingState.get(userId);
+  if (!state || !state.confirm) return showBookVisit(chatId);
+
+  const { dateFrom, dateTo, masterId, masterName, phone } = state.confirm;
+  const meta = userMeta.get(userId);
+  const clientName = meta ? `${meta.first_name || ''}${meta.last_name ? ' ' + meta.last_name : ''}`.trim() : 'Клієнт';
+
+  try {
+    const client = await bp.createClient({ phone, name: clientName });
+    const appt = await bp.createAppointment({
+      client_id: client.id || client.client_id,
+      service_id: state.serviceId,
+      employee_id: masterId,
+      date_from: dateFrom,
+      date_to: dateTo,
+      note: 'Запис через Telegram-бот',
+    });
+
+    const appointmentId = String(appt.id || appt.appointment_id || '');
+
+    // Notify admin
+    const adminChat = process.env.ADMIN_CHAT_ID;
+    if (adminChat) {
+      tg('sendMessage', {
+        chat_id: adminChat, parse_mode: 'HTML',
+        text: `📋 <b>Новий запис через бот</b>\n\n👤 ${clientName}\n📞 ${phone}\n💇 ${state.service.name}\n👩 ${masterName}\n📅 ${state.confirm.dateKey} о ${state.confirm.time}\n\nID: ${appointmentId}`,
+      }).catch(() => {});
+    }
+
+    bookingState.delete(userId);
+
+    return tg('sendMessage', {
+      chat_id: chatId, parse_mode: 'HTML',
+      text: `✅ <b>Запис підтверджено!</b>\n\n` +
+        `💇 ${state.service.name}\n` +
+        `📅 ${state.confirm.dateKey} о <b>${state.confirm.time}</b>\n` +
+        `👩 Майстер: ${masterName}\n\n` +
+        `Чекаємо вас у SVS Beauty Space! 💛\n\n` +
+        `📍 1-ша Набережна р. Стрілка, 50, Суми`,
+      reply_markup: mainMenuKeyboard(),
+    });
+  } catch (e) {
+    console.error('[book:execute]', e.message);
+    bookingState.delete(userId);
+    return tg('sendMessage', {
+      chat_id: chatId, parse_mode: 'HTML',
+      text: `⚠️ Не вдалось створити запис: ${e.message}\n\nСпробуйте ще раз або зателефонуйте: +380991283375`,
+      reply_markup: mainMenuKeyboard(),
+    });
+  }
 }
 
 async function showPriceCategories(chatId) {
@@ -390,6 +648,17 @@ router.post('/telegram', async (req, res) => {
         });
       }
       if (data === 'action:call_admin') return showAdmin(chatId);
+      // ── Booking flow callbacks ──
+      if (data === 'book:start') return showBookVisit(chatId);
+      if (data.startsWith('book:cat:')) return showBookServices(chatId, data.slice(9), cq.from.id);
+      if (data.startsWith('book:svc:')) return showBookDates(chatId, data.slice(9), cq.from.id);
+      if (data.startsWith('book:date:')) return showBookSlots(chatId, data.slice(10), cq.from.id);
+      if (data.startsWith('book:slot:')) {
+        const parts = data.slice(10).split(':');
+        const [dk, time, mid] = [parts[0], parts[1] + ':' + parts[2], parts.slice(3).join(':')];
+        return confirmBooking(chatId, dk, time, mid, cq.from.id);
+      }
+      if (data === 'book:confirm:yes') return executeBooking(chatId, cq.from.id);
       // ── Shop callbacks ──
       if (data.startsWith('shop:')) {
         const userPhone = userPhones.get(cq.from.id) || null;
@@ -492,7 +761,15 @@ router.post('/telegram', async (req, res) => {
       const phone = '+' + msg.contact.phone_number.replace(/\D/g, '');
       userPhones.set(msg.from.id, phone);
 
-      // Якщо є pending booking — підтверджуємо
+      // Якщо є pending booking flow (новий) — продовжуємо підтвердження
+      const bState = bookingState.get(msg.from.id);
+      if (bState && bState.pendingConfirm) {
+        const { dateKey, time, masterId } = bState.pendingConfirm;
+        delete bState.pendingConfirm;
+        return confirmBooking(chatId, dateKey, time, masterId, msg.from.id);
+      }
+
+      // Якщо є pending booking (старий in-memory) — підтверджуємо
       const row = db.byTgUser(msg.from.id);
       if (row) {
         try {
