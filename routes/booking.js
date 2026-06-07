@@ -209,6 +209,22 @@ async function showBranchBritanska(chatId) { return showAdmin(chatId); }
 async function showBranchKharkivska(chatId) { return showAdmin(chatId); }
 
 // ═══ FUZZY SEARCH — пошук послуги вільним текстом ═══
+// Beauty-specific synonyms: query word → also search for these
+const SYNONYMS = {
+  'брови': ['брів', 'brow'], 'бровки': ['брів', 'brow'], 'брів': ['брови'],
+  'нарощенє': ['нарощування'], 'наращивание': ['нарощування'], 'нарощення': ['нарощування'],
+  'ламінуванє': ['ламінування'], 'ламинирование': ['ламінування'],
+  'маникюр': ['манікюр'], 'педикюр': ['педікюр'],
+  'стрижка': ['стрижк'], 'підстригти': ['стрижк'], 'подстричь': ['стрижк'],
+  'фарбування': ['фарбуванн', 'окрашивание'], 'окрашивание': ['фарбуванн'],
+  'депіляція': ['депіляц', 'шугаринг', 'воск'], 'епіляція': ['депіляц', 'шугаринг'],
+  'чистка': ['чистк', 'пілінг'], 'пилинг': ['пілінг'],
+  'масаж': ['масаж', 'massage'], 'массаж': ['масаж'],
+  'вії': ['вій'], 'ресницы': ['вій', 'нарощування'],
+  'нігті': ['нігт', 'гель лак'], 'ногти': ['нігт', 'гель лак'],
+  'волосся': ['волосс'], 'волосы': ['волосс'],
+};
+
 function normalize(s) {
   return s.toLowerCase()
     .replace(/ё/g, 'е').replace(/ї/g, 'і').replace(/є/g, 'е')
@@ -221,13 +237,22 @@ function fuzzyMatch(query, services) {
   const words = q.split(' ').filter(w => w.length >= 2);
   if (!words.length) return [];
 
+  // Expand words with synonyms
+  const expandedWords = [];
+  for (const w of words) {
+    expandedWords.push(w);
+    const syns = SYNONYMS[w];
+    if (syns) expandedWords.push(...syns.map(normalize));
+  }
+  const allWords = [...new Set(expandedWords)];
+
   const scored = services.map(svc => {
     const name = normalize(svc.name);
     let score = 0;
     // Exact substring match (highest priority)
     if (name.includes(q)) score += 100;
-    // Word matches
-    for (const w of words) {
+    // Word matches (including synonyms)
+    for (const w of allWords) {
       if (name.includes(w)) score += 30;
       // Partial match (≥3 chars of word found in name)
       else if (w.length >= 3 && name.split(' ').some(nw => nw.includes(w.slice(0, 3)))) score += 10;
