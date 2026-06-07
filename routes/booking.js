@@ -225,11 +225,39 @@ const SYNONYMS = {
   'волосся': ['волосс'], 'волосы': ['волосс'],
 };
 
+// Transliterate Latin → Cyrillic (covers common translit styles)
+const TRANSLIT = {
+  'shch':'щ','sch':'щ','zh':'ж','ch':'ч','sh':'ш','ts':'ц','yu':'ю','ya':'я','yo':'ё',
+  'ye':'є','yi':'ї','ia':'я','iu':'ю','ie':'є',
+  'a':'а','b':'б','v':'в','g':'г','d':'д','e':'е','z':'з','i':'і','y':'и',
+  'k':'к','l':'л','m':'м','n':'н','o':'о','p':'п','r':'р','s':'с','t':'т',
+  'u':'у','f':'ф','h':'х','x':'кс','c':'к','w':'в','j':'й','q':'к',
+};
+function latinToCyrillic(s) {
+  let result = '';
+  let i = 0;
+  while (i < s.length) {
+    let matched = false;
+    // Try longest match first (4, 3, 2, 1)
+    for (const len of [4, 3, 2, 1]) {
+      const chunk = s.slice(i, i + len);
+      if (TRANSLIT[chunk]) { result += TRANSLIT[chunk]; i += len; matched = true; break; }
+    }
+    if (!matched) { result += s[i]; i++; }
+  }
+  return result;
+}
+
 function normalize(s) {
-  return s.toLowerCase()
+  let t = s.toLowerCase()
     .replace(/ё/g, 'е').replace(/ї/g, 'і').replace(/є/g, 'е')
     .replace(/['ʼ`]/g, '').replace(/[^a-zа-яіґ0-9 ]/g, ' ')
     .replace(/\s+/g, ' ').trim();
+  // If input has Latin chars, also produce Cyrillic version
+  if (/[a-z]/.test(t)) {
+    t = t.split(' ').map(w => /[a-z]/.test(w) ? latinToCyrillic(w) : w).join(' ');
+  }
+  return t;
 }
 
 function fuzzyMatch(query, services) {
