@@ -73,9 +73,21 @@ async function getToken() {
   try { return await pendingAuth; } finally { pendingAuth = null; }
 }
 
+// BP API tightening (verified 2026-06-08): `fields` is required on every request,
+// `id` is implicit and rejected in fields list, and `name` is read-only on clients
+// (must use firstname/lastname).
+const CLIENT_FIELDS = 'firstname,lastname,phone,email';
+const APPT_FIELDS = 'date_from,date_to,services,client,location,status';
+
+function splitName(raw) {
+  const s = String(raw || 'Клієнт').trim();
+  const parts = s.split(/\s+/);
+  return { firstname: parts[0] || 'Клієнт', lastname: parts.slice(1).join(' ') || null };
+}
+
 async function findClientByPhone(phone) {
   const token = await getToken();
-  const res = await request('GET', '/clients', { token, query: { phone } });
+  const res = await request('GET', '/clients', { token, query: { phone, fields: CLIENT_FIELDS } });
   const list = res.data || res.items || res;
   return Array.isArray(list) && list.length ? list[0] : null;
 }
@@ -84,25 +96,46 @@ async function createClient({ phone, name, email }) {
   const existing = await findClientByPhone(phone);
   if (existing) return existing;
   const token = await getToken();
+  const { firstname, lastname } = splitName(name);
+  const body = { phone, firstname };
+  if (lastname) body.lastname = lastname;
+  if (email) body.email = email;
   return request('POST', '/clients', {
     token,
-    body: { phone, name: name || 'Клієнт', email: email || null },
+    body,
+    query: { fields: CLIENT_FIELDS },
   });
 }
 
+// BP schema (verified 2026-06-08):
+//   date = 'YYYY-MM-DD'  (date only, no time)
+//   services = [{ service, employee, start: 'YYYY-MM-DDTHH:MM:SS', duration }]
+// Старый интерфейс booking-server передаёт date_from / date_to (ISO datetime).
+// Внутри конвертируем в date + start + duration_minutes.
 async function createAppointment({ client_id, service_id, employee_id, date_from, date_to, location_id, note }) {
   const token = await getToken();
+  const dt = new Date(date_from);
+  const dtEnd = new Date(date_to);
+  if (Number.isNaN(dt.getTime()) || Number.isNaN(dtEnd.getTime())) {
+    throw new Error('createAppointment: invalid date_from / date_to');
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  const dateOnly = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+  const startIso = `${dateOnly}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+  const duration = Math.max(15, Math.round((dtEnd - dt) / 60000));
+  // Назначение мастера идёт через `professional`, а не `employee`
+  // (employee — служебное поле BP, возвращается null).
+  const fields = 'date,client,location,state,services(start,service,professional,duration)';
   return request('POST', '/appointments', {
     token,
     body: {
       client: client_id,
-      services: [{ service: service_id, professional: employee_id }],
-      date_from,
-      date_to,
       location: location_id || LOCATION,
-      note: note || 'Онлайн-запис з сайту (підтверджено Telegram)',
+      date: dateOnly,
+      services: [{ service: service_id, professional: employee_id, start: startIso, duration }],
+      // 'note' BP больше не принимает на верхнем уровне
     },
-    query: { force: 'true', fields: 'id,date_from,date_to,services,client,location,status' },
+    query: { force: 'true', fields },
   });
 }
 
