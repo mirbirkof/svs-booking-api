@@ -331,7 +331,7 @@ async function handleFreeTextSearch(chatId, text, userId) {
     if (!results.length) {
       return tg('sendMessage', {
         chat_id: chatId, parse_mode: 'HTML',
-        text: `🔍 Не знайшла послугу за запитом "<b>${text}</b>".\n\nСпробуйте іншими словами або оберіть з меню:`,
+        text: `🤔 Не знайшла "<b>${text}</b>".\n\nСпробуйте іншими словами, наприклад:\n• <i>манікюр</i>\n• <i>нарощування вій</i>\n• <i>стрижка</i>\n\nАбо оберіть з категорій 👇`,
         reply_markup: { inline_keyboard: [
           [{ text: '🗓 Обрати з категорій', callback_data: 'book:start' }],
           [{ text: '📄 Прайс-лист', callback_data: 'price:start' }],
@@ -346,7 +346,7 @@ async function handleFreeTextSearch(chatId, text, userId) {
     buttons.push([{ text: '🗓 Обрати з категорій', callback_data: 'book:start' }]);
     return tg('sendMessage', {
       chat_id: chatId, parse_mode: 'HTML',
-      text: `🔍 За запитом "<b>${text}</b>" знайдено:\n\nОберіть послугу — далі покажу вільні дати та майстрів 👇`,
+      text: `🔍 За "<b>${text}</b>" знайдено:\n\n② Натисніть на потрібну послугу 👇\nДалі покажу вільні дати та майстрів`,
       reply_markup: { inline_keyboard: buttons },
     });
   } catch (e) {
@@ -365,7 +365,10 @@ async function showBookVisit(chatId) {
   return tg('sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
-    text: '<b>🗓 Запис на візит</b>\n\nОберіть категорію або <b>напишіть що потрібно</b> своїми словами\n(наприклад: "нарощування", "манікюр", "стрижка"):',
+    text: '<b>🗓 Запис на візит</b>\n\n' +
+      '① Оберіть категорію нижче 👇\n\n' +
+      '...або просто <b>напишіть що потрібно</b> — ' +
+      'хоч "нарощування", хоч "brovi", хоч "хочу нігті" 😊',
     reply_markup: {
       inline_keyboard: [
         ...CAT_ORDER.map(c => [{ text: CAT_LABEL[c], callback_data: `book:cat:${c}` }]),
@@ -420,7 +423,7 @@ async function showBookServices(chatId, cat, userId) {
 
     return tg('sendMessage', {
       chat_id: chatId, parse_mode: 'HTML',
-      text: `<b>${CAT_LABEL[cat] || cat}</b>\n\nОберіть послугу:`,
+      text: `<b>${CAT_LABEL[cat] || cat}</b>\n\n② Натисніть на послугу, яка вам потрібна 👇`,
       reply_markup: { inline_keyboard: buttons },
     });
   } catch (e) {
@@ -470,7 +473,7 @@ async function showBookDates(chatId, serviceId, userId) {
 
     return tg('sendMessage', {
       chat_id: chatId, parse_mode: 'HTML',
-      text: `<b>${svc.name}</b> · ${svc.duration} хв · ${svc.price || '—'} грн\n\nОберіть дату (у дужках — кількість вільних вікон):`,
+      text: `<b>${svc.name}</b> · ${svc.duration} хв · ${svc.price || '—'} грн\n\n③ Оберіть зручний день 👇\nЦифра в дужках = скільки вільних вікон`,
       reply_markup: { inline_keyboard: buttons },
     });
   } catch (e) {
@@ -520,7 +523,7 @@ async function showBookSlots(chatId, dateKey, userId) {
 
   return tg('sendMessage', {
     chat_id: chatId, parse_mode: 'HTML',
-    text: `<b>${state.service.name}</b>\n📅 ${dayNames[d.getDay()]}, ${d.getDate()}.${String(d.getMonth()+1).padStart(2,'0')}\n\nОберіть час та майстра:`,
+    text: `<b>${state.service.name}</b>\n📅 ${dayNames[d.getDay()]}, ${d.getDate()}.${String(d.getMonth()+1).padStart(2,'0')}\n\n④ Оберіть час та майстра 👇\nНатисніть на зручний варіант:`,
     reply_markup: { inline_keyboard: limited },
   });
 }
@@ -536,7 +539,7 @@ async function confirmBooking(chatId, dateKey, time, masterId, userId) {
     bookingState.set(userId, state);
     return tg('sendMessage', {
       chat_id: chatId, parse_mode: 'HTML',
-      text: 'Для підтвердження запису поділіться номером телефону:',
+      text: '📱 Останній крок!\nНатисніть кнопку нижче щоб поділитись номером — це потрібно для запису:',
       reply_markup: { keyboard: [[{ text: '📱 Поділитись номером', request_contact: true }]], resize_keyboard: true, one_time_keyboard: true },
     });
   }
@@ -568,7 +571,7 @@ async function confirmBooking(chatId, dateKey, time, masterId, userId) {
       `👩 Майстер: <b>${masterName}</b>\n` +
       `⏱ Тривалість: ${duration} хв\n` +
       (state.service.price ? `💰 Вартість: ${state.service.price} грн\n` : '') +
-      `\nУсе вірно?`,
+      `\n⑤ Перевірте та натисніть "Підтвердити" 👇`,
     reply_markup: {
       inline_keyboard: [
         [{ text: '✅ Підтвердити запис', callback_data: 'book:confirm:yes' }],
@@ -854,7 +857,7 @@ router.post('/telegram', async (req, res) => {
         }
         return tg('sendMessage', {
           chat_id: chatId,
-          text: 'Для підтвердження запису поділіться номером телефону:',
+          text: '📱 Останній крок!\nНатисніть кнопку нижче щоб поділитись номером — це потрібно для запису:',
           reply_markup: {
             keyboard: [[{ text: '📱 Поділитись номером', request_contact: true }]],
             one_time_keyboard: true, resize_keyboard: true,
