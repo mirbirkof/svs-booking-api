@@ -102,7 +102,7 @@ async function createAppointment({ client_id, service_id, employee_id, date_from
       location: location_id || LOCATION,
       note: note || 'Онлайн-запис з сайту (підтверджено Telegram)',
     },
-    query: { force: 'true' },
+    query: { force: 'true', fields: 'id,date_from,date_to,services,client,location,status' },
   });
 }
 
