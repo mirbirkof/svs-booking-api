@@ -14,6 +14,7 @@ const DATABASE_CODE = process.env.BEAUTYPRO_DATABASE_CODE || '664684';
 const LOCATION = process.env.BEAUTYPRO_LOCATION_ID || '88de9f7c-c225-02e0-597c-7a296e9d6499';
 
 let cache = { token: null, expiresAt: 0, refreshToken: null };
+let pendingAuth = null; // dedup concurrent getToken() calls
 
 function request(method, path, { token, body, query } = {}) {
   return new Promise((resolve, reject) => {
@@ -52,18 +53,24 @@ async function getToken() {
   const now = Date.now();
   if (cache.token && cache.expiresAt > now + 60_000) return cache.token;
 
-  // GET /auth/database?application_id&application_secret&database_code
-  const res = await request('GET', '/auth/database', {
-    query: {
-      application_id: APP_ID,
-      application_secret: SECRET,
-      database_code: DATABASE_CODE,
-    },
-  });
-  cache.token = res.access_token || res.token;
-  cache.refreshToken = res.refresh_token;
-  cache.expiresAt = now + (res.expires_in ? res.expires_in * 1000 : 23 * 3600 * 1000);
-  return cache.token;
+  // Dedup: if auth is already in-flight, wait for that same promise
+  if (pendingAuth) return pendingAuth;
+
+  pendingAuth = (async () => {
+    const res = await request('GET', '/auth/database', {
+      query: {
+        application_id: APP_ID,
+        application_secret: SECRET,
+        database_code: DATABASE_CODE,
+      },
+    });
+    cache.token = res.access_token || res.token;
+    cache.refreshToken = res.refresh_token;
+    cache.expiresAt = Date.now() + (res.expires_in ? res.expires_in * 1000 : 23 * 3600 * 1000);
+    return cache.token;
+  })();
+
+  try { return await pendingAuth; } finally { pendingAuth = null; }
 }
 
 async function findClientByPhone(phone) {
@@ -99,15 +106,30 @@ async function createAppointment({ client_id, service_id, employee_id, date_from
   });
 }
 
+// Retry wrapper: on 401 invalidate cache and retry once
+async function withRetry(fn) {
+  try { return await fn(); }
+  catch (e) {
+    if (e.message && e.message.includes('401')) {
+      cache.token = null; cache.expiresAt = 0;
+      return fn();
+    }
+    throw e;
+  }
+}
+
 async function listServices() {
-  const token = await getToken();
-  // BeautyPro API requires explicit fields= param
-  return request('GET', '/services', { token, query: { fields: 'name,duration,price,category', archive: 'false' } });
+  return withRetry(async () => {
+    const token = await getToken();
+    return request('GET', '/services', { token, query: { fields: 'name,duration,price,category', archive: 'false' } });
+  });
 }
 
 async function listEmployees() {
-  const token = await getToken();
-  return request('GET', '/employees', { token, query: { fields: 'name,services,positions', archive: 'false', location: LOCATION } });
+  return withRetry(async () => {
+    const token = await getToken();
+    return request('GET', '/employees', { token, query: { fields: 'name,services,positions', archive: 'false', location: LOCATION } });
+  });
 }
 
 async function freeTime({ duration, professional, from, to, location }) {
