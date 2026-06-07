@@ -593,11 +593,30 @@ async function findComboDates(chatId, userId) {
     combos.forEach((combo, ci) => {
       const d = new Date(combo.date + 'T12:00:00');
       const dateLabel = `${dayNames[d.getDay()]} ${d.getDate()} ${monthNames[d.getMonth()]}`;
-      text += `<b>📅 ${dateLabel}:</b>\n`;
-      combo.schedule.forEach(slot => {
-        const mName = (masterMap[slot.masterId] || 'Майстер').split(' ').slice(0, 2).join(' ');
-        text += `  ${slot.time} — ${slot.name} (${mName})\n`;
-      });
+      const firstStart = combo.schedule[0].time;
+      const lastEnd = combo.schedule.reduce((max, s) => s.endTime > max ? s.endTime : max, '00:00');
+      const totalMin = timeToMin(lastEnd) - timeToMin(firstStart);
+      const sumMin = combo.schedule.reduce((s, x) => s + x.duration, 0);
+      const saved = sumMin - totalMin;
+
+      text += `<b>📅 ${dateLabel}</b> · ${firstStart}–${lastEnd} (~${totalMin} хв)`;
+      if (saved > 0) text += ` <i>💡 −${saved} хв паралельно!</i>`;
+      text += '\n';
+      const byTime = {};
+      combo.schedule.forEach(slot => { if (!byTime[slot.time]) byTime[slot.time] = []; byTime[slot.time].push(slot); });
+      for (const t of Object.keys(byTime).sort()) {
+        const slots = byTime[t];
+        if (slots.length > 1) {
+          text += `  <b>${t}</b> ⚡ одночасно:\n`;
+          slots.forEach(slot => {
+            const mName = (masterMap[slot.masterId] || 'Майстер').split(' ').slice(0, 2).join(' ');
+            text += `    → ${slot.name} (${mName})\n`;
+          });
+        } else {
+          const mName = (masterMap[slots[0].masterId] || 'Майстер').split(' ').slice(0, 2).join(' ');
+          text += `  <b>${slots[0].time}</b> — ${slots[0].name} (${mName})\n`;
+        }
+      }
       text += '\n';
       // Encode combo as callback data
       const comboData = combo.schedule.map(s => `${s.time}:${s.masterId}:${s.serviceId}`).join('|');
@@ -626,63 +645,70 @@ async function findComboDates(chatId, userId) {
 }
 
 // Try to schedule all cart items in a single day
+// PARALLEL mode: services with DIFFERENT masters can run simultaneously
+// (e.g., manicure + pedicure = 2 nail masters at the same time)
 function tryScheduleDay(cart, servicesMasters, daySlots, allTimes) {
-  // Greedy: for each service in cart, find earliest available slot
-  const schedule = [];
   const usedMasterTimes = {}; // masterId → Set of used time slots
 
-  for (const item of cart) {
+  function tryPlace(item, startTimeIdx) {
     const possibleMasters = servicesMasters[item.id] || [];
-    const slotsNeeded = Math.ceil((item.duration || 60) / 30); // 30-min blocks
-    let placed = false;
-
-    for (const startTime of allTimes) {
-      // Check if this time block is after the last scheduled item
-      if (schedule.length) {
-        const lastEnd = schedule[schedule.length - 1].endTime;
-        if (startTime < lastEnd) continue;
+    const slotsNeeded = Math.ceil((item.duration || 60) / 30);
+    for (const mId of possibleMasters) {
+      const startTime = allTimes[startTimeIdx];
+      if (!daySlots[startTime] || !daySlots[startTime].has(mId)) continue;
+      let canFit = true;
+      for (let b = 0; b < slotsNeeded && startTimeIdx + b < allTimes.length; b++) {
+        const t = allTimes[startTimeIdx + b];
+        if (!daySlots[t] || !daySlots[t].has(mId)) { canFit = false; break; }
+        if (usedMasterTimes[mId] && usedMasterTimes[mId].has(t)) { canFit = false; break; }
       }
+      if (!canFit) continue;
+      const endIdx = startTimeIdx + slotsNeeded;
+      const endTime = endIdx < allTimes.length ? allTimes[endIdx] : addMinutes(startTime, item.duration || 60);
+      return { serviceId: item.id, name: item.name, time: startTime, endTime, masterId: mId, duration: item.duration || 60 };
+    }
+    return null;
+  }
 
-      // Find a master available for all needed blocks
-      for (const mId of possibleMasters) {
-        if (!daySlots[startTime] || !daySlots[startTime].has(mId)) continue;
+  function commitPlacement(placement, item) {
+    const slotsNeeded = Math.ceil((item.duration || 60) / 30);
+    const startIdx = allTimes.indexOf(placement.time);
+    if (!usedMasterTimes[placement.masterId]) usedMasterTimes[placement.masterId] = new Set();
+    for (let b = 0; b < slotsNeeded && startIdx + b < allTimes.length; b++) {
+      usedMasterTimes[placement.masterId].add(allTimes[startIdx + b]);
+    }
+  }
 
-        // Check consecutive blocks for this master
-        const startIdx = allTimes.indexOf(startTime);
-        let canFit = true;
-        for (let b = 0; b < slotsNeeded && startIdx + b < allTimes.length; b++) {
-          const t = allTimes[startIdx + b];
-          if (!daySlots[t] || !daySlots[t].has(mId)) { canFit = false; break; }
-          if (usedMasterTimes[mId] && usedMasterTimes[mId].has(t)) { canFit = false; break; }
-        }
-        if (!canFit) continue;
+  // Longer services first (harder to fit)
+  const sorted = [...cart].sort((a, b) => (b.duration || 60) - (a.duration || 60));
+  const schedule = [];
 
-        // Place it
-        const endIdx = startIdx + slotsNeeded;
-        const endTime = endIdx < allTimes.length ? allTimes[endIdx] : addMinutes(startTime, item.duration || 60);
-
-        // Mark master times as used
-        if (!usedMasterTimes[mId]) usedMasterTimes[mId] = new Set();
-        for (let b = 0; b < slotsNeeded && startIdx + b < allTimes.length; b++) {
-          usedMasterTimes[mId].add(allTimes[startIdx + b]);
-        }
-
-        schedule.push({
-          serviceId: item.id,
-          name: item.name,
-          time: startTime,
-          endTime,
-          masterId: mId,
-          duration: item.duration || 60,
-        });
-        placed = true;
+  for (const item of sorted) {
+    let bestPlacement = null;
+    for (let ti = 0; ti < allTimes.length; ti++) {
+      const placement = tryPlace(item, ti);
+      if (placement) {
+        // Overlap is OK if DIFFERENT master (parallel!)
+        const samemaster = schedule.some(s =>
+          placement.time < s.endTime && placement.endTime > s.time && s.masterId === placement.masterId
+        );
+        if (samemaster) continue;
+        bestPlacement = placement;
         break;
       }
-      if (placed) break;
     }
-    if (!placed) return null; // Can't fit this service
+    if (!bestPlacement) return null;
+    commitPlacement(bestPlacement, item);
+    schedule.push(bestPlacement);
   }
+
+  schedule.sort((a, b) => a.time.localeCompare(b.time));
   return schedule;
+}
+
+function timeToMin(t) {
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
 }
 
 function addMinutes(timeStr, mins) {
