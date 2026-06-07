@@ -208,6 +208,101 @@ async function showMainMenu(chatId, name) {
 async function showBranchBritanska(chatId) { return showAdmin(chatId); }
 async function showBranchKharkivska(chatId) { return showAdmin(chatId); }
 
+// ═══ FUZZY SEARCH — пошук послуги вільним текстом ═══
+function normalize(s) {
+  return s.toLowerCase()
+    .replace(/ё/g, 'е').replace(/ї/g, 'і').replace(/є/g, 'е')
+    .replace(/['ʼ`]/g, '').replace(/[^a-zа-яіґ0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+function fuzzyMatch(query, services) {
+  const q = normalize(query);
+  const words = q.split(' ').filter(w => w.length >= 2);
+  if (!words.length) return [];
+
+  const scored = services.map(svc => {
+    const name = normalize(svc.name);
+    let score = 0;
+    // Exact substring match (highest priority)
+    if (name.includes(q)) score += 100;
+    // Word matches
+    for (const w of words) {
+      if (name.includes(w)) score += 30;
+      // Partial match (≥3 chars of word found in name)
+      else if (w.length >= 3 && name.split(' ').some(nw => nw.includes(w.slice(0, 3)))) score += 10;
+      // Levenshtein-like: check each word in name
+      else {
+        for (const nw of name.split(' ')) {
+          if (nw.length >= 3 && levenshtein(w, nw) <= Math.floor(w.length / 3)) { score += 15; break; }
+        }
+      }
+    }
+    return { svc, score };
+  });
+
+  return scored
+    .filter(x => x.score >= 10)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6)
+    .map(x => x.svc);
+}
+
+function levenshtein(a, b) {
+  if (a.length > b.length) [a, b] = [b, a];
+  let prev = Array.from({ length: a.length + 1 }, (_, i) => i);
+  for (let j = 1; j <= b.length; j++) {
+    const curr = [j];
+    for (let i = 1; i <= a.length; i++) {
+      curr[i] = a[i-1] === b[j-1] ? prev[i-1] : 1 + Math.min(prev[i-1], prev[i], curr[i-1]);
+    }
+    prev = curr;
+  }
+  return prev[a.length];
+}
+
+let svcCacheForSearch = { list: [], ts: 0 };
+async function getServicesForSearch() {
+  const now = Date.now();
+  if (svcCacheForSearch.list.length && (now - svcCacheForSearch.ts) < 5 * 60_000) return svcCacheForSearch.list;
+  const raw = await bp.listServices();
+  svcCacheForSearch.list = Array.isArray(raw) ? raw : (raw.data || raw.items || []);
+  svcCacheForSearch.ts = now;
+  return svcCacheForSearch.list;
+}
+
+async function handleFreeTextSearch(chatId, text, userId) {
+  try {
+    const services = await getServicesForSearch();
+    const results = fuzzyMatch(text, services);
+    if (!results.length) {
+      return tg('sendMessage', {
+        chat_id: chatId, parse_mode: 'HTML',
+        text: `🔍 Не знайшла послугу за запитом "<b>${text}</b>".\n\nСпробуйте іншими словами або оберіть з меню:`,
+        reply_markup: { inline_keyboard: [
+          [{ text: '🗓 Обрати з категорій', callback_data: 'book:start' }],
+          [{ text: '📄 Прайс-лист', callback_data: 'price:start' }],
+        ]},
+      });
+    }
+    const buttons = results.map(s => {
+      const price = s.price ? ` — ${s.price}₴` : '';
+      const dur = s.duration ? ` (${s.duration}хв)` : '';
+      return [{ text: `${s.name}${dur}${price}`, callback_data: `book:svc:${s.id}` }];
+    });
+    buttons.push([{ text: '🗓 Обрати з категорій', callback_data: 'book:start' }]);
+    return tg('sendMessage', {
+      chat_id: chatId, parse_mode: 'HTML',
+      text: `🔍 За запитом "<b>${text}</b>" знайдено:\n\nОберіть послугу — далі покажу вільні дати та майстрів 👇`,
+      reply_markup: { inline_keyboard: buttons },
+    });
+  } catch (e) {
+    console.error('[fuzzy-search]', e.message);
+    return tg('sendMessage', { chat_id: chatId, text: '❌ Помилка пошуку. Спробуйте через меню.',
+      reply_markup: { inline_keyboard: [[{ text: '🗓 Обрати з категорій', callback_data: 'book:start' }]] } });
+  }
+}
+
 // ═══ BOOKING FLOW: услуга → дата → время+мастер → подтверждение ═══
 // In-memory state per user for booking flow
 const bookingState = new Map(); // tgUserId → { step, service, date, ... }
@@ -217,7 +312,7 @@ async function showBookVisit(chatId) {
   return tg('sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
-    text: '<b>🗓 Запис на візит</b>\n\nОберіть категорію послуг:',
+    text: '<b>🗓 Запис на візит</b>\n\nОберіть категорію або <b>напишіть що потрібно</b> своїми словами\n(наприклад: "нарощування", "манікюр", "стрижка"):',
     reply_markup: {
       inline_keyboard: [
         ...CAT_ORDER.map(c => [{ text: CAT_LABEL[c], callback_data: `book:cat:${c}` }]),
@@ -745,6 +840,11 @@ router.post('/telegram', async (req, res) => {
     if (text === '🛍 Магазин косметики') return shop.showShopMain(tg, chatId);
     if (text === '🎁 Отримати знижку') return showDiscount(chatId);
     if (text === '« Назад') return showMainMenu(chatId, msg.from.first_name);
+
+    // ── Free-text search: если текст ≥2 символа и не команда — ищем услугу ──
+    if (text && text.length >= 2 && !text.startsWith('/') && !msg.contact && !msg.successful_payment) {
+      return handleFreeTextSearch(chatId, text, msg.from.id);
+    }
 
     // ── Successful payment ─────────────────────────────
     if (msg.successful_payment) {
