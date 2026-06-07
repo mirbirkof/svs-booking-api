@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Raywell — SVS Beauty Space</title>
+<style>
+  :root {
+    --bg: #faf7f3;
+    --ink: #1d1c1a;
+    --muted: #6b6760;
+    --line: #e8e2d8;
+    --accent: #8b6a3f;
+    --accent-2: #b58a52;
+    --ok: #2f7a47;
+    --err: #b13a3a;
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: inherit; }
+  header { position: sticky; top: 0; z-index: 10; background: rgba(250, 247, 243, .92); backdrop-filter: saturate(150%) blur(8px); border-bottom: 1px solid var(--line); }
+  .nav { max-width: 1080px; margin: 0 auto; padding: 14px 18px; display: flex; align-items: center; gap: 14px; }
+  .logo { font-weight: 700; letter-spacing: .04em; }
+  .nav-spacer { flex: 1; }
+  .cart-btn { position: relative; background: var(--ink); color: #fff; border: 0; padding: 10px 16px; border-radius: 999px; font-weight: 600; cursor: pointer; }
+  .cart-btn .badge { display: inline-block; min-width: 18px; padding: 0 6px; margin-left: 6px; border-radius: 9px; background: var(--accent-2); color: #fff; font-size: 12px; line-height: 18px; text-align: center; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 18px 80px; }
+  h1 { font-size: 28px; margin: 8px 0 6px; }
+  .lead { color: var(--muted); margin: 0 0 28px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; box-shadow: var(--shadow); }
+  .card .cat { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .card h3 { font-size: 16px; margin: 6px 0 4px; }
+  .card .desc { font-size: 13px; color: var(--muted); flex: 1; }
+  .row { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; }
+  .price { font-weight: 700; font-size: 18px; }
+  .stock-low { color: var(--err); font-size: 12px; }
+  .stock-ok { color: var(--ok); font-size: 12px; }
+  .btn { background: var(--accent); color: #fff; border: 0; padding: 10px 14px; border-radius: 10px; font-weight: 600; cursor: pointer; transition: background .15s; }
+  .btn:hover { background: var(--accent-2); }
+  .btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  .btn[disabled] { opacity: .55; cursor: not-allowed; }
+
+  /* Cart drawer */
+  .drawer-bg { position: fixed; inset: 0; background: rgba(0,0,0,.4); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 20; }
+  .drawer-bg.open { opacity: 1; pointer-events: auto; }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 92vw); background: var(--bg); transform: translateX(100%); transition: transform .25s; z-index: 30; display: flex; flex-direction: column; }
+  .drawer.open { transform: translateX(0); }
+  .drawer h2 { margin: 0; padding: 18px 20px; font-size: 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; }
+  .drawer h2 .close { margin-left: auto; background: transparent; border: 0; font-size: 22px; cursor: pointer; color: var(--muted); }
+  .drawer-body { flex: 1; overflow-y: auto; padding: 14px 20px; }
+  .drawer-foot { padding: 16px 20px; border-top: 1px solid var(--line); background: #fff; }
+  .item { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
+  .item:last-child { border-bottom: 0; }
+  .item .ttl { font-weight: 600; font-size: 14px; }
+  .item .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .qty { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .qty button { background: #fff; border: 0; padding: 4px 10px; cursor: pointer; font-size: 16px; }
+  .qty span { padding: 0 8px; min-width: 20px; text-align: center; font-weight: 600; }
+  .totals { display: grid; gap: 6px; margin: 10px 0 14px; }
+  .totals .line { display: flex; justify-content: space-between; color: var(--muted); }
+  .totals .line.total { color: var(--ink); font-size: 18px; font-weight: 700; padding-top: 8px; border-top: 1px solid var(--line); }
+
+  form .field { display: block; margin: 10px 0; }
+  form label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  form input, form select, form textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 15px; background: #fff; font-family: inherit; }
+  form input:focus, form select:focus, form textarea:focus { outline: 2px solid var(--accent-2); outline-offset: 0; }
+  .pay-btn { width: 100%; padding: 14px; font-size: 16px; border-radius: 12px; background: var(--ink); color: #fff; border: 0; font-weight: 700; cursor: pointer; }
+  .pay-btn:hover { background: #000; }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--ink); color: #fff; padding: 12px 18px; border-radius: 999px; opacity: 0; transition: all .2s; z-index: 50; pointer-events: none; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .empty { color: var(--muted); text-align: center; padding: 40px 20px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="nav">
+    <div class="logo">RAYWELL · SVS</div>
+    <div class="nav-spacer"></div>
+    <button class="cart-btn" id="cartBtn">Корзина <span class="badge" id="cartCount">0</span></button>
+  </div>
+</header>
+
+<main>
+  <h1>Професійний догляд за волоссям Raywell</h1>
+  <p class="lead">Італійський бренд. Тонуючі шампуні, відновлюючі маски. Доставка Новою Поштою по Україні.</p>
+  <div class="grid" id="grid"></div>
+</main>
+
+<div class="drawer-bg" id="drawerBg"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <h2>Замовлення<button class="close" id="closeDrawer">×</button></h2>
+  <div class="drawer-body" id="drawerBody">
+    <div class="empty">Корзина порожня</div>
+  </div>
+  <div class="drawer-foot" id="drawerFoot" style="display:none">
+    <div class="totals">
+      <div class="line"><span>Товари</span><span id="sumSubtotal">0₴</span></div>
+      <div class="line"><span>Доставка</span><span id="sumDelivery">—</span></div>
+      <div class="line total"><span>Разом</span><span id="sumTotal">0₴</span></div>
+    </div>
+    <form id="checkoutForm" novalidate>
+      <div class="field"><label>Ім'я</label><input name="firstName" required></div>
+      <div class="field"><label>Телефон</label><input name="phone" type="tel" placeholder="+380501234567" required></div>
+      <div class="field"><label>Email (для чека)</label><input name="email" type="email"></div>
+      <div class="field"><label>Доставка</label>
+        <select name="deliveryMethod">
+          <option value="nova_poshta">Нова Пошта (80₴, орієнтовно)</option>
+          <option value="pickup">Самовивіз із салону (безкоштовно)</option>
+        </select>
+      </div>
+      <div class="field" id="addressField"><label>Адреса / відділення</label><input name="address" placeholder="Місто, № відділення"></div>
+      <button class="pay-btn" type="submit" id="payBtn">Оплатити Mono Pay</button>
+    </form>
+  </div>
+</aside>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = (location.origin && !location.origin.startsWith('file:')) ? location.origin : 'http://127.0.0.1:4099';
+
+const cart = new Map(JSON.parse(localStorage.getItem('rw_cart') || '[]'));
+let catalog = [];
+
+function fmt(uah) { return Math.round(uah).toLocaleString('uk-UA') + '₴'; }
+function saveCart() { localStorage.setItem('rw_cart', JSON.stringify([...cart])); renderCart(); renderBadge(); }
+function renderBadge() {
+  const n = [...cart.values()].reduce((a,b)=>a+b,0);
+  document.getElementById('cartCount').textContent = n;
+}
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2200);
+}
+
+async function loadCatalog() {
+  try {
+    const r = await fetch(API + '/api/shop/products');
+    const j = await r.json();
+    catalog = j.products || [];
+    renderGrid();
+  } catch (e) {
+    document.getElementById('grid').innerHTML = '<p class="empty">Не вдалось завантажити каталог: ' + e.message + '</p>';
+  }
+}
+
+function renderGrid() {
+  const root = document.getElementById('grid');
+  root.innerHTML = '';
+  if (!catalog.length) { root.innerHTML = '<p class="empty">Каталог порожній</p>'; return; }
+  for (const p of catalog) {
+    const stock = p.inStock
+      ? (p.stockQty <= 3 ? `<span class="stock-low">Залишок: ${p.stockQty} шт</span>` : `<span class="stock-ok">В наявності</span>`)
+      : `<span class="stock-low">Немає в наявності</span>`;
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="cat">${p.category || p.brand}</div>
+      <h3>${p.name}</h3>
+      <div class="desc">${p.description || ''}</div>
+      ${stock}
+      <div class="row">
+        <div class="price">${fmt(p.price)}</div>
+        <button class="btn" data-sku="${p.sku}" ${p.inStock ? '' : 'disabled'}>До корзини</button>
+      </div>
+    `;
+    card.querySelector('button').addEventListener('click', () => addToCart(p.sku));
+    root.appendChild(card);
+  }
+}
+
+function addToCart(sku) {
+  cart.set(sku, (cart.get(sku) || 0) + 1);
+  saveCart();
+  showToast('Додано до корзини');
+}
+function changeQty(sku, delta) {
+  const next = (cart.get(sku) || 0) + delta;
+  if (next <= 0) cart.delete(sku); else cart.set(sku, next);
+  saveCart();
+}
+
+function renderCart() {
+  const body = document.getElementById('drawerBody');
+  const foot = document.getElementById('drawerFoot');
+  if (!cart.size) {
+    body.innerHTML = '<div class="empty">Корзина порожня</div>';
+    foot.style.display = 'none';
+    return;
+  }
+  foot.style.display = '';
+  let subtotal = 0;
+  const items = [...cart.entries()].map(([sku, qty]) => {
+    const p = catalog.find(x => x.sku === sku);
+    if (!p) return '';
+    const line = p.price * qty;
+    subtotal += line;
+    return `
+      <div class="item">
+        <div style="flex:1">
+          <div class="ttl">${p.name}</div>
+          <div class="sub">${fmt(p.price)} × ${qty}</div>
+        </div>
+        <div>
+          <div class="qty">
+            <button onclick="changeQty('${sku}', -1)">−</button>
+            <span>${qty}</span>
+            <button onclick="changeQty('${sku}', 1)">+</button>
+          </div>
+          <div style="text-align:right; font-weight:700; margin-top:4px;">${fmt(line)}</div>
+        </div>
+      </div>`;
+  }).join('');
+  body.innerHTML = items;
+
+  const dm = document.querySelector('[name=deliveryMethod]').value;
+  const delivery = dm === 'pickup' ? 0 : 80;
+  document.getElementById('sumSubtotal').textContent = fmt(subtotal);
+  document.getElementById('sumDelivery').textContent = delivery ? fmt(delivery) : 'Безкоштовно';
+  document.getElementById('sumTotal').textContent = fmt(subtotal + delivery);
+}
+
+document.getElementById('cartBtn').onclick = () => {
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawerBg').classList.add('open');
+  renderCart();
+};
+document.getElementById('closeDrawer').onclick = closeDrawer;
+document.getElementById('drawerBg').onclick = closeDrawer;
+function closeDrawer() {
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawerBg').classList.remove('open');
+}
+
+// Toggle address field
+document.addEventListener('change', (e) => {
+  if (e.target.name === 'deliveryMethod') {
+    document.getElementById('addressField').style.display = e.target.value === 'pickup' ? 'none' : '';
+    renderCart();
+  }
+});
+
+document.getElementById('checkoutForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const items = [...cart.entries()].map(([sku, qty]) => ({ sku, qty }));
+  if (!items.length) return showToast('Корзина порожня');
+  const payload = {
+    phone: fd.get('phone'),
+    email: fd.get('email') || null,
+    firstName: fd.get('firstName'),
+    items,
+    delivery: { method: fd.get('deliveryMethod'), address: fd.get('address') || null },
+  };
+  const btn = document.getElementById('payBtn');
+  btn.disabled = true; btn.textContent = 'Створюємо замовлення...';
+  try {
+    const r = await fetch(API + '/api/shop/orders', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Помилка');
+    if (j.paymentUrl) {
+      location.href = j.paymentUrl;
+    } else {
+      showToast(`Замовлення #${j.orderId.slice(-6)} створено. Оплата: ${fmt(j.total)} — Mono Pay активуємо коли отримаємо токен.`);
+      cart.clear(); saveCart(); closeDrawer();
+    }
+  } catch (err) {
+    showToast('Помилка: ' + err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Оплатити Mono Pay';
+  }
+});
+
+loadCatalog();
+renderBadge();
+</script>
+</body>
+</html>

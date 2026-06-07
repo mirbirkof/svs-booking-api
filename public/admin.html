@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SVS Beauty — Адмін-панель</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#faf6f1;color:#2a1f17;margin:0;padding:24px;max-width:880px;margin:0 auto}
+  h1{color:#8b6f47;margin:0 0 8px}
+  h2{color:#5c4a36;border-bottom:1px solid #e6dccd;padding-bottom:6px;margin-top:28px}
+  .muted{color:#8a7d6e;font-size:13px}
+  .card{background:#fff;border-radius:14px;padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.04);margin-bottom:18px}
+  input,button{font:inherit;padding:10px 14px;border-radius:10px;border:1px solid #d9cfbb;background:#fff}
+  button{background:#8b6f47;color:#fff;border:none;cursor:pointer}
+  button:hover{background:#735738}
+  button.danger{background:#b94a4a}
+  button.danger:hover{background:#933}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .stat{display:inline-block;min-width:140px;margin:6px 14px 6px 0}
+  .stat .v{font-size:22px;font-weight:700;color:#8b6f47}
+  .stat .l{font-size:12px;color:#8a7d6e;text-transform:uppercase;letter-spacing:.05em}
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:14px}
+  th,td{text-align:left;padding:8px 12px;border-bottom:1px solid #f0e7d6}
+  th{color:#8a7d6e;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.05em}
+  .err{color:#b94a4a;padding:10px;background:#fdecec;border-radius:8px;margin:10px 0}
+  .ok{color:#3a7a3a;padding:10px;background:#eaf6ea;border-radius:8px;margin:10px 0}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<h1>SVS Beauty — Адмін-панель</h1>
+<div class="muted">Керування чорним списком, статистика онлайн-записів.</div>
+
+<div id="auth" class="card">
+  <h2>Вхід</h2>
+  <div class="row">
+    <input type="password" id="token" placeholder="X-Admin-Token" style="flex:1;min-width:280px">
+    <button onclick="login()">Увійти</button>
+  </div>
+  <div class="muted" style="margin-top:8px">Токен зберігається тільки в браузері (localStorage).</div>
+</div>
+
+<div id="panel" class="hidden">
+  <div class="card">
+    <h2>Статистика</h2>
+    <div id="stats"></div>
+    <button onclick="loadStats()" style="margin-top:10px">↻ Оновити</button>
+    <button onclick="logout()" style="background:#999">Вийти</button>
+  </div>
+
+  <div class="card">
+    <h2>Чорний список</h2>
+    <div class="row" style="margin-bottom:12px">
+      <input id="bl-phone" placeholder="+380XXXXXXXXX" style="flex:1;min-width:200px">
+      <input id="bl-reason" placeholder="причина" style="flex:1;min-width:200px">
+      <button onclick="addBlacklist()">+ Додати</button>
+    </div>
+    <div id="bl-msg"></div>
+    <table>
+      <thead><tr><th>Телефон</th><th>Причина</th><th>Додано</th><th></th></tr></thead>
+      <tbody id="bl-list"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const API = '';   // same-origin
+let TOKEN = localStorage.getItem('svs_admin_token') || '';
+
+function el(id){return document.getElementById(id)}
+function show(id){el(id).classList.remove('hidden')}
+function hide(id){el(id).classList.add('hidden')}
+
+async function apicall(path, opts={}) {
+  const r = await fetch(API + path, {
+    ...opts,
+    headers: { 'x-admin-token': TOKEN, 'Content-Type': 'application/json', ...(opts.headers||{}) }
+  });
+  if (r.status === 401) { logout(); throw new Error('Невірний токен'); }
+  if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.status);
+  return r.json();
+}
+
+async function login() {
+  TOKEN = el('token').value.trim();
+  if (!TOKEN) return;
+  try {
+    await apicall('/api/admin/stats');
+    localStorage.setItem('svs_admin_token', TOKEN);
+    hide('auth'); show('panel');
+    loadStats(); loadBlacklist();
+  } catch (e) {
+    alert('Помилка входу: ' + e.message);
+  }
+}
+
+function logout() {
+  TOKEN = ''; localStorage.removeItem('svs_admin_token');
+  show('auth'); hide('panel');
+  el('token').value = '';
+}
+
+async function loadStats() {
+  const labels = {
+    appointments_total:'Усього записів', appointments_active:'Активних',
+    appointments_cancelled:'Скасованих', blacklist:'У ЧС',
+    notifications_pending:'Нагадувань очікує', notifications_sent:'Відправлено', notifications_skipped:'Пропущено'
+  };
+  try {
+    const s = await apicall('/api/admin/stats');
+    el('stats').innerHTML = Object.keys(labels).map(k =>
+      `<div class="stat"><div class="v">${s[k] ?? 0}</div><div class="l">${labels[k]}</div></div>`
+    ).join('');
+  } catch (e) { el('stats').innerHTML = `<div class="err">${e.message}</div>`; }
+}
+
+async function loadBlacklist() {
+  try {
+    const list = await apicall('/api/admin/blacklist');
+    el('bl-list').innerHTML = list.length ? list.map(r => `
+      <tr>
+        <td>${r.client_phone}</td>
+        <td>${r.reason||'<span class="muted">—</span>'}</td>
+        <td class="muted">${r.added_at||''}</td>
+        <td><button class="danger" onclick="removeBl('${r.client_phone}')">×</button></td>
+      </tr>`).join('') : '<tr><td colspan="4" class="muted">Список порожній</td></tr>';
+  } catch (e) { el('bl-list').innerHTML = `<tr><td colspan="4" class="err">${e.message}</td></tr>`; }
+}
+
+async function addBlacklist() {
+  const phone = el('bl-phone').value.trim();
+  const reason = el('bl-reason').value.trim();
+  if (!phone) return;
+  try {
+    await apicall('/api/admin/blacklist', { method:'POST', body: JSON.stringify({ phone, reason }) });
+    el('bl-phone').value = ''; el('bl-reason').value = '';
+    el('bl-msg').innerHTML = `<div class="ok">Додано: ${phone}</div>`;
+    setTimeout(()=>el('bl-msg').innerHTML='', 2000);
+    loadBlacklist(); loadStats();
+  } catch (e) {
+    el('bl-msg').innerHTML = `<div class="err">${e.message}</div>`;
+  }
+}
+
+async function removeBl(phone) {
+  if (!confirm('Видалити ' + phone + ' з ЧС?')) return;
+  try {
+    await apicall('/api/admin/blacklist/' + encodeURIComponent(phone), { method:'DELETE' });
+    loadBlacklist(); loadStats();
+  } catch (e) { alert(e.message); }
+}
+
+// Авто-вхід якщо токен у localStorage
+if (TOKEN) {
+  el('token').value = TOKEN;
+  apicall('/api/admin/stats').then(() => {
+    hide('auth'); show('panel'); loadStats(); loadBlacklist();
+  }).catch(() => { /* лишити форму входу */ });
+}
+</script>
+</body>
+</html>
