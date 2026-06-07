@@ -90,11 +90,11 @@ const SITE_URL = process.env.SVS_SITE_URL || 'https://svs-beauty-space.com';
 const ADMIN_PHONE = process.env.SVS_ADMIN_PHONE || '+380991283375';
 const ADMIN_TG = process.env.SVS_ADMIN_TG || 'Svsf1rstbot';
 const CAT_LABEL = {
-  hair: '💇‍♀️ Перукарські послуги',
-  nails: '💅 Нігтьовий сервіс',
-  brows: '✨ Візаж та брови',
-  lashes: '👁 Нарощення вій',
-  massage: '💆‍♀️ Масаж боді / фейс ліфтинг',
+  hair: '💇‍♀️ Волосся',
+  nails: '💅 Нігті',
+  brows: '✨ Візаж/брови',
+  lashes: '👁 Вії',
+  massage: '💆 Масаж/боді',
 };
 const CAT_ORDER = ['hair', 'nails', 'brows', 'lashes', 'massage'];
 
@@ -371,7 +371,7 @@ async function showBookVisit(chatId) {
       'хоч "нарощування", хоч "brovi", хоч "хочу нігті" 😊',
     reply_markup: {
       inline_keyboard: [
-        ...CAT_ORDER.map(c => [{ text: CAT_LABEL[c], callback_data: `book:cat:${c}` }]),
+        ...(() => { const rows = []; for (let i = 0; i < CAT_ORDER.length; i += 2) { const row = [{ text: CAT_LABEL[CAT_ORDER[i]], callback_data: `book:cat:${CAT_ORDER[i]}` }]; if (CAT_ORDER[i+1]) row.push({ text: CAT_LABEL[CAT_ORDER[i+1]], callback_data: `book:cat:${CAT_ORDER[i+1]}` }); rows.push(row); } return rows; })(),
         [{ text: '« Назад', callback_data: 'menu:main' }],
       ],
     },
@@ -640,7 +640,7 @@ async function showPriceCategories(chatId) {
     parse_mode: 'HTML',
     text: '<b>📋 Прайс-лист</b>\n\nОберіть категорію послуг:',
     reply_markup: {
-      inline_keyboard: CAT_ORDER.map(c => [{ text: CAT_LABEL[c], callback_data: `cat:${c}` }]),
+      inline_keyboard: (() => { const rows = []; for (let i = 0; i < CAT_ORDER.length; i += 2) { const row = [{ text: CAT_LABEL[CAT_ORDER[i]], callback_data: `cat:${CAT_ORDER[i]}` }]; if (CAT_ORDER[i+1]) row.push({ text: CAT_LABEL[CAT_ORDER[i+1]], callback_data: `cat:${CAT_ORDER[i+1]}` }); rows.push(row); } return rows; })(),
     },
   });
 }
