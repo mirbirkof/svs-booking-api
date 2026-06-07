@@ -557,25 +557,23 @@ router.post('/direct', async (req, res) => {
     }
 
     // Blacklist check
-    if (db.isBlacklisted(phone)) {
+    if (await db.isBlacklisted(phone)) {
       return res.status(403).json({ error: 'Онлайн-запис недоступний. Зателефонуйте салону.' });
     }
 
     // Idempotency — захист від подвійного кліку / retry
     const idemKey = idempotency_key || null;
     if (idemKey) {
-      const claim = db.tryClaimIdempotency(idemKey, phone);
+      const claim = await db.tryClaimIdempotency(idemKey, phone);
       if (!claim.claimed) {
-        // повторний запит з тим самим key
         if (claim.existing && claim.existing.status === 'success' && claim.existing.response_body) {
           return res.json(JSON.parse(claim.existing.response_body));
         }
         if (claim.existing && claim.existing.status === 'pending') {
           return res.status(409).json({ error: 'Запит уже обробляється, зачекайте секунду' });
         }
-        // failed — пробуємо знову з тим самим key (видаляємо старий)
-        try { db.getDb().prepare('DELETE FROM idempotency_keys WHERE key = ?').run(idemKey); } catch (_) {}
-        db.tryClaimIdempotency(idemKey, phone);
+        try { await db.getDb().query('DELETE FROM idempotency_keys WHERE key = $1', [idemKey]); } catch (_) {}
+        await db.tryClaimIdempotency(idemKey, phone);
       }
     }
 
@@ -599,13 +597,13 @@ router.post('/direct', async (req, res) => {
       // Локальний лог + cancel_token
       let cancel_token = null;
       try {
-        db.logAppointment({
+        await db.logAppointment({
           appointment_id, client_phone: phone, client_name: cleanName,
           service_id, service_name, master_id: employee_id, master_name,
           start_at: new Date(date_from).toISOString(), duration_min,
           status: 'active', source: 'widget',
         });
-        cancel_token = db.createCancelToken({
+        cancel_token = await db.createCancelToken({
           appointment_id, client_phone: phone,
           service_id, service_name,
           master_id: employee_id, master_name,
@@ -629,11 +627,11 @@ router.post('/direct', async (req, res) => {
           cancel_token,
         };
         if (startTs - Date.now() > 24*3600*1000) {
-          db.scheduleNotification({ appointment_id, cancel_token, client_phone: phone,
+          await db.scheduleNotification({ appointment_id, cancel_token, client_phone: phone,
             event: 'reminder_24h', scheduled_at: remind24, payload });
         }
         if (startTs - Date.now() > 2*3600*1000 + 5*60*1000) {
-          db.scheduleNotification({ appointment_id, cancel_token, client_phone: phone,
+          await db.scheduleNotification({ appointment_id, cancel_token, client_phone: phone,
             event: 'reminder_2h', scheduled_at: remind2, payload });
         }
       } catch (notifErr) {
@@ -641,10 +639,10 @@ router.post('/direct', async (req, res) => {
       }
 
       const responseBody = { ok: true, appointment_id, cancel_token };
-      if (idemKey) db.completeIdempotency(idemKey, appointment_id, responseBody);
+      if (idemKey) await db.completeIdempotency(idemKey, appointment_id, responseBody);
       return res.json(responseBody);
     } catch (crmErr) {
-      if (idemKey) db.failIdempotency(idemKey, crmErr.message);
+      if (idemKey) await db.failIdempotency(idemKey, crmErr.message);
       throw crmErr;
     }
   } catch (e) {
@@ -654,16 +652,16 @@ router.post('/direct', async (req, res) => {
 });
 
 // === GET /confirm?token — клієнт підтверджує прихід (по лінку з нагадування) ==
-router.get('/confirm', (req, res) => {
+router.get('/confirm', async (req, res) => {
   const db = require('../db/client');
   const token = String(req.query.token || '');
   if (!token) return res.status(400).send('<h1>Помилка</h1><p>Невірне посилання</p>');
-  const row = db.getCancelToken(token);
+  const row = await db.getCancelToken(token);
   if (!row) return res.status(404).send('<h1>Не знайдено</h1><p>Посилання застаріло або скасоване</p>');
   if (row.status !== 'active') return res.send('<h1>Запис уже оброблено</h1>');
   try {
-    db.getDb().prepare(`UPDATE cancel_tokens SET confirmed_at = datetime('now') WHERE token = ?`).run(token);
-  } catch (_) { /* колонка може ще не існувати — не критично */ }
+    await db.getDb().query(`UPDATE cancel_tokens SET used_at = NOW() WHERE token = $1`, [token]);
+  } catch (_) { /* не критично */ }
   const html = `<!DOCTYPE html><html lang="uk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Запис підтверджено</title>
@@ -680,9 +678,9 @@ ${row.master_name ? '<div class="muted">Майстер: '+row.master_name+'</div
 });
 
 // === GET /booking/info/:token — деталі запису для екрану «скасувати/перенести»
-router.get('/info/:token', (req, res) => {
+router.get('/info/:token', async (req, res) => {
   const db = require('../db/client');
-  const row = db.getCancelToken(String(req.params.token || ''));
+  const row = await db.getCancelToken(String(req.params.token || ''));
   if (!row) return res.status(404).json({ error: 'Токен не знайдено' });
   res.json({
     appointment_id: row.appointment_id,
@@ -702,11 +700,10 @@ router.post('/cancel', async (req, res) => {
   try {
     const { token, reason } = req.body || {};
     if (!token) return res.status(400).json({ error: 'token обовʼязковий' });
-    const row = db.getCancelToken(token);
+    const row = await db.getCancelToken(token);
     if (!row) return res.status(404).json({ error: 'Токен не знайдено або протух' });
     if (row.status !== 'active') return res.status(409).json({ error: 'Запис вже оброблено: ' + (row.used_action || row.status) });
 
-    // Мінімум 2 години до запису — захист від no-show у останню хвилину
     const minHours = 2;
     const hoursToAppt = (new Date(row.start_at).getTime() - Date.now()) / 3600000;
     if (hoursToAppt < minHours) {
@@ -715,22 +712,18 @@ router.post('/cancel', async (req, res) => {
       });
     }
 
-    // Скасовуємо у BeautyPro
     let crmOk = false;
     try {
       if (typeof bp.cancelAppointment === 'function') {
         await bp.cancelAppointment(row.appointment_id, reason || 'cancelled_by_client');
         crmOk = true;
-      } else {
-        console.warn('[booking/cancel] bp.cancelAppointment не реалізовано — позначаю лише локально');
       }
     } catch (crmErr) {
       console.error('[booking/cancel] CRM error:', crmErr.message);
-      // Все одно консьюмимо токен — клієнт не повинен страждати
     }
 
-    db.consumeCancelToken(token, 'cancel');
-    db.updateAppointmentStatus(row.appointment_id, 'cancelled');
+    await db.consumeCancelToken(token, 'cancel');
+    await db.updateAppointmentStatus(row.appointment_id, 'cancelled');
     res.json({ ok: true, crm_synced: crmOk });
   } catch (e) {
     console.error('[booking/cancel]', e.message);
@@ -747,7 +740,7 @@ router.post('/reschedule', async (req, res) => {
     if (!token || !new_date_from || !new_date_to) {
       return res.status(400).json({ error: 'token, new_date_from, new_date_to обовʼязкові' });
     }
-    const row = db.getCancelToken(token);
+    const row = await db.getCancelToken(token);
     if (!row) return res.status(404).json({ error: 'Токен не знайдено' });
     if (row.status !== 'active') return res.status(409).json({ error: 'Запис вже оброблено' });
 
@@ -757,13 +750,12 @@ router.post('/reschedule', async (req, res) => {
       return res.status(422).json({ error: `Перенос можливий не пізніше ніж за ${minHours}г` });
     }
 
-    // У BeautyPro немає прямого reschedule — використовуємо cancel + create
     try {
       if (typeof bp.cancelAppointment === 'function') {
         await bp.cancelAppointment(row.appointment_id, 'rescheduled_by_client');
       }
       const appt = await bp.createAppointment({
-        client_id: null,  // BeautyPro знайде за phone
+        client_id: null,
         service_id: row.service_id,
         employee_id: row.master_id,
         date_from: new_date_from,
@@ -771,11 +763,10 @@ router.post('/reschedule', async (req, res) => {
         note: 'Перенесено клієнтом',
       });
       const new_appointment_id = String(appt.id || appt.appointment_id || '');
-      db.consumeCancelToken(token, 'reschedule');
-      db.updateAppointmentStatus(row.appointment_id, 'rescheduled');
+      await db.consumeCancelToken(token, 'reschedule');
+      await db.updateAppointmentStatus(row.appointment_id, 'rescheduled');
 
-      // Новий cancel_token для нового запису
-      const new_token = db.createCancelToken({
+      const new_token = await db.createCancelToken({
         appointment_id: new_appointment_id,
         client_phone: row.client_phone,
         service_id: row.service_id, service_name: row.service_name,
