@@ -39,6 +39,7 @@ app.use('/api/admin', require('./routes/admin'));
 // CRM-layer (путь C) — магазин Raywell + вебхуки BeautyPro
 app.use('/api/shop', require('./routes/shop'));
 app.use('/api/webhooks', require('./routes/webhooks'));
+app.use('/api/internal', require('./routes/internal'));
 
 app.use((err, req, res, next) => {
   console.error('[svs-booking]', err.message);
