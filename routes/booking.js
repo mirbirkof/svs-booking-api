@@ -408,9 +408,7 @@ async function showBookVisit(chatId, userId) {
     catRows.push([{ text: `✅ Далі — підібрати дату (${cart.length} послуг)`, callback_data: 'book:cart:done' }]);
     catRows.push([{ text: '🗑 Очистити кошик', callback_data: 'book:cart:clear' }]);
   } else {
-    text += '① Оберіть категорію 👇\n\n' +
-      'Можна обрати <b>кілька послуг</b> з різних категорій!\n' +
-      '...або просто <b>напишіть що потрібно</b> 😊';
+    text += 'Оберіть категорію 👇';
   }
   catRows.push([{ text: '« Назад', callback_data: 'menu:main' }]);
 
@@ -474,7 +472,7 @@ async function showBookServices(chatId, cat, userId) {
 
     return tg('sendMessage', {
       chat_id: chatId, parse_mode: 'HTML',
-      text: `<b>${CAT_LABEL[cat] || cat}</b>\n\n② Натисніть на послугу, яка вам потрібна 👇`,
+      text: `<b>${CAT_LABEL[cat] || cat}</b>\n\nНатисніть на послугу — і одразу оберете день та час 👇`,
       reply_markup: { inline_keyboard: buttons },
     });
   } catch (e) {
@@ -873,8 +871,9 @@ async function showBookDates(chatId, serviceId, userId) {
         reply_markup: { inline_keyboard: [[{ text: '« Назад', callback_data: 'book:start' }]] } });
     }
 
-    // Save state
-    bookingState.set(userId, { service: svc, serviceId, masters, slots });
+    // Save state (кошик зберігаємо — потрібен для «Додати ще послугу»)
+    const prev = bookingState.get(userId) || {};
+    bookingState.set(userId, { ...prev, service: svc, serviceId, masters, slots });
 
     // Show dates as buttons (group by rows of 2)
     const dayNames = ['Нд','Пн','Вт','Ср','Чт','Пт','Сб'];
@@ -889,11 +888,12 @@ async function showBookDates(chatId, serviceId, userId) {
       if (row.length === 2) { buttons.push(row); row = []; }
     }
     if (row.length) buttons.push(row);
-    buttons.push([{ text: '« Назад', callback_data: 'book:start' }]);
+    buttons.push([{ text: '➕ Додати ще послугу', callback_data: 'book:start' }]);
+    buttons.push([{ text: '« Назад', callback_data: 'book:back-to-services' }]);
 
     return tg('sendMessage', {
       chat_id: chatId, parse_mode: 'HTML',
-      text: `<b>${svc.name}</b> · ${svc.duration} хв · ${svc.price || '—'} грн\n\n③ Оберіть зручний день 👇\nЦифра в дужках = скільки вільних вікон`,
+      text: `<b>${svc.name}</b> · ${svc.duration} хв · ${svc.price || '—'} грн\n\nОберіть зручний день 👇\nЦифра в дужках = скільки вільних вікон`,
       reply_markup: { inline_keyboard: buttons },
     });
   } catch (e) {
@@ -943,7 +943,7 @@ async function showBookSlots(chatId, dateKey, userId) {
 
   return tg('sendMessage', {
     chat_id: chatId, parse_mode: 'HTML',
-    text: `<b>${state.service.name}</b>\n📅 ${dayNames[d.getDay()]}, ${d.getDate()}.${String(d.getMonth()+1).padStart(2,'0')}\n\n④ Оберіть час та майстра 👇\nНатисніть на зручний варіант:`,
+    text: `<b>${state.service.name}</b>\n📅 ${dayNames[d.getDay()]}, ${d.getDate()}.${String(d.getMonth()+1).padStart(2,'0')}\n\nОберіть час та майстра 👇`,
     reply_markup: { inline_keyboard: limited },
   });
 }
@@ -991,11 +991,12 @@ async function confirmBooking(chatId, dateKey, time, masterId, userId) {
       `👩 Майстер: <b>${masterName}</b>\n` +
       `⏱ Тривалість: ${duration} хв\n` +
       (state.service.price ? `💰 Вартість: ${state.service.price} грн\n` : '') +
-      `\n⑤ Перевірте та натисніть "Підтвердити" 👇`,
+      (state.service.price ? `💳 Після підтвердження надішлю посилання на передоплату 30%\n` : '') +
+      `\nВсе вірно? 👇`,
     reply_markup: {
       inline_keyboard: [
         [{ text: '✅ Підтвердити запис', callback_data: 'book:confirm:yes' }],
-        [{ text: '❌ Скасувати', callback_data: 'book:start' }],
+        [{ text: '❌ Скасувати', callback_data: 'book:cancel' }],
       ],
     },
   });
@@ -1240,12 +1241,27 @@ router.post('/telegram', async (req, res) => {
       if (data === 'book:start') return showBookVisit(chatId, cq.from.id);
       if (data.startsWith('book:cat:')) return showBookServices(chatId, data.slice(9), cq.from.id);
       if (data.startsWith('book:add:')) {
-        // Toggle service in cart: book:add:catKey:serviceId
+        // book:add:catKey:serviceId
         const rest = data.slice(9);
         const sepIdx = rest.indexOf(':');
         const catKey = rest.slice(0, sepIdx);
         const svcId = rest.slice(sepIdx + 1);
+        const st = bookingState.get(cq.from.id);
+        // Кошик порожній → одна послуга, одразу до вибору дати (простий шлях)
+        if (!st || !st.cart || !st.cart.length) {
+          return handleSingleServiceSelect(chatId, svcId, cq.from.id);
+        }
+        // Кошик уже є (режим «додати ще») → toggle як раніше
         return toggleCartService(chatId, catKey, svcId, cq.from.id);
+      }
+      if (data === 'book:back-to-services') {
+        // «Назад» з екрана дат: прибираємо поточну послугу з кошика і повертаємось до категорій
+        const st = bookingState.get(cq.from.id);
+        if (st && st.cart && st.serviceId) {
+          st.cart = st.cart.filter(c => c.id !== st.serviceId);
+          bookingState.set(cq.from.id, st);
+        }
+        return showBookVisit(chatId, cq.from.id);
       }
       if (data === 'book:cart:done') return handleCartDone(chatId, cq.from.id);
       if (data === 'book:cart:clear') {
@@ -1258,6 +1274,11 @@ router.post('/telegram', async (req, res) => {
         const parts = data.slice(10).split(':');
         const [dk, time, mid] = [parts[0], parts[1] + ':' + parts[2], parts.slice(3).join(':')];
         return confirmBooking(chatId, dk, time, mid, cq.from.id);
+      }
+      if (data === 'book:cancel') {
+        bookingState.delete(cq.from.id);
+        await tg('sendMessage', { chat_id: chatId, text: 'Запис скасовано. Нічого не записано 👌' });
+        return showMainMenu(chatId, cq.from.first_name);
       }
       if (data === 'book:confirm:yes') return executeBooking(chatId, cq.from.id);
       if (data.startsWith('book:combo:')) return pickComboSlot(chatId, data, cq.from.id);
