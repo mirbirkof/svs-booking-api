@@ -13,6 +13,30 @@ const https = require('https');
 const router = express.Router();
 const bp = require('../beautyproClient');
 const shop = require('../shop');
+const dbpg = require('../db-pg');
+
+// upsert клиента в общую CRM-базу; устойчив к конфликту по telegram_id
+async function upsertCrmClient(phone, name, tgUserId) {
+  try {
+    const r = await dbpg.query(
+      `INSERT INTO clients (phone, name, telegram_id, source)
+       VALUES ($1, $2, $3, 'bot-salon')
+       ON CONFLICT (tenant_id, phone) DO UPDATE SET
+         telegram_id = COALESCE(clients.telegram_id, EXCLUDED.telegram_id),
+         name = COALESCE(NULLIF(clients.name,''), EXCLUDED.name)
+       RETURNING id`,
+      [phone, name || null, tgUserId]
+    );
+    return r.rows[0].id;
+  } catch (e) {
+    // telegram_id уже занят другим клиентом (другой телефон) — ищем существующего
+    const f = await dbpg.query(
+      `SELECT id FROM clients WHERE phone = $1 OR telegram_id = $2 ORDER BY (phone = $1) DESC LIMIT 1`,
+      [phone, tgUserId]
+    );
+    return f.rowCount ? f.rows[0].id : null;
+  }
+}
 
 // In-memory pending bookings (MVP — replace with SQLite later)
 const store = new Map();
@@ -186,7 +210,7 @@ function mainMenuKeyboard() {
 
 async function showMainMenu(chatId, name) {
   const text =
-    `<b>SVS Beauty Space</b> — салон краси у Львові 💖\n\n` +
+    `<b>SVS Beauty Space</b> — салон краси у Сумах 💖\n\n` +
     `Що ми вміємо тут, у боті:\n` +
     `🗓 Записатись онлайн до майстра за пару кліків\n` +
     `📄 Подивитись прайс по категоріях\n` +
@@ -775,6 +799,26 @@ async function executeComboBooking(chatId, userId, combo, phone) {
     const ok = results.filter(r => r.ok);
     const fail = results.filter(r => !r.ok);
 
+    // Журнал online_bookings (общая Neon) — отсюда CRM создаёт Mono-предоплату
+    if (dbpg.isEnabled() && ok.length) {
+      try {
+        const clientId = await upsertCrmClient(phone, clientName, userId);
+        for (const r of ok) {
+          await dbpg.query(
+            `INSERT INTO online_bookings
+              (client_id, client_phone, client_name, service_id, master_id,
+               date_from, date_to, channel, bp_appointment_id, status, telegram_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'bot',$8,'confirmed',$9)`,
+            [clientId, phone, clientName || null, String(r.serviceId),
+             String(r.masterId), `${combo.date}T${r.time}:00`, `${combo.date}T${r.endTime}:00`,
+             String(r.id || ''), userId]
+          );
+        }
+      } catch (logErr) {
+        console.error('[combo:ob-log]', logErr.message);
+      }
+    }
+
     const d = new Date(combo.date + 'T12:00:00');
     const dayNames = ['Нд','Пн','Вт','Ср','Чт','Пт','Сб'];
 
@@ -978,6 +1022,23 @@ async function executeBooking(chatId, userId) {
 
     const appointmentId = String(appt.id || appt.appointment_id || '');
 
+    // Журнал online_bookings (общая Neon) — отсюда CRM создаёт Mono-предоплату
+    if (dbpg.isEnabled()) {
+      try {
+        const clientId = await upsertCrmClient(phone, clientName, userId);
+        await dbpg.query(
+          `INSERT INTO online_bookings
+            (client_id, client_phone, client_name, service_id, master_id,
+             date_from, date_to, channel, bp_appointment_id, status, telegram_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'bot',$8,'confirmed',$9)`,
+          [clientId, phone, clientName || null, String(state.serviceId),
+           String(masterId), dateFrom, dateTo, appointmentId, userId]
+        );
+      } catch (logErr) {
+        console.error('[book:ob-log]', logErr.message);
+      }
+    }
+
     // Notify admin
     const adminChat = process.env.ADMIN_CHAT_ID;
     if (adminChat) {
@@ -1129,7 +1190,7 @@ async function showAbout(chatId) {
   return tg('sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
-    text: `<b>ℹ️ SVS Beauty Space</b>\n\nПреміум салон краси у Львові: волосся, нігті, обличчя, масаж та body sculpt.\n\nКоманда сертифікованих майстрів, преміум-косметика, авторські процедури.\n\n🌐 ${SITE_URL}`,
+    text: `<b>ℹ️ SVS Beauty Space</b>\n\nПреміум салон краси у Сумах: волосся, нігті, обличчя, масаж та body sculpt.\n\nКоманда сертифікованих майстрів, преміум-косметика, авторські процедури.\n\n🌐 ${SITE_URL}`,
     reply_markup: mainMenuKeyboard(),
   });
 }
@@ -1287,9 +1348,15 @@ router.post('/telegram', async (req, res) => {
     if (text === '🎁 Отримати знижку') return showDiscount(chatId);
     if (text === '« Назад') return showMainMenu(chatId, msg.from.first_name);
 
-    // ── Free-text search: если текст ≥2 символа и не команда — ищем услугу ──
-    if (text && text.length >= 2 && !text.startsWith('/') && !msg.contact && !msg.successful_payment) {
-      return handleFreeTextSearch(chatId, text, msg.from.id);
+    // ── Невідомий текст: НЕ вгадуємо по словах — показуємо чітке меню ──
+    if (text && !text.startsWith('/') && !msg.contact && !msg.successful_payment) {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        parse_mode: 'HTML',
+        text: 'Я працюю кнопками, так простіше і без помилок 🙂\nОберіть дію в меню нижче 👇',
+        reply_markup: mainMenuKeyboard(),
+      });
+      return;
     }
 
     // ── Successful payment ─────────────────────────────
