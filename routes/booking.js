@@ -122,6 +122,25 @@ const CAT_LABEL = {
 };
 const CAT_ORDER = ['hair', 'nails', 'brows', 'lashes', 'massage'];
 
+// Повна карта категорій BeautyPro → UI-категорії бота (звірено з BP API 10.06)
+// short = ключ для callback_data, label = підпис кнопки підкатегорії
+const BP_CATEGORIES = [
+  { id: '88deba75-de29-4fcd-57ac-e23d7b0da276', short: 'sveta',  ui: 'hair',    label: '👩‍🦰 Світлана' },
+  { id: '88deba75-dde8-ecf0-783f-1287064f794a', short: 'julia',  ui: 'hair',    label: '👩‍🦰 Юлія' },
+  { id: '88deba75-ddf9-9eaa-57ac-e23d1325ae90', short: 'vira',   ui: 'hair',    label: '👩‍🦰 Віра' },
+  { id: '88deba75-de0a-5172-500e-323d51507ece', short: 'inna',   ui: 'hair',    label: '👩‍🦰 Інна' },
+  { id: '88deba75-de18-9c79-57ac-e23d3877784d', short: 'nspec',  ui: 'nails',   label: '💅 Майстер' },
+  { id: '88deba75-de39-fda4-500e-323d0962e307', short: 'ntop',   ui: 'nails',   label: '💅 Топ-майстер' },
+  { id: '88deba75-de58-fbf4-57ac-e23d46888bbe', short: 'lashc',  ui: 'lashes',  label: '👁 Нарощення вій' },
+  { id: '88deba75-de48-4b92-57ac-e23d0ef4a3f1', short: 'lashl',  ui: 'lashes',  label: '👁 LED нарощування' },
+  { id: '88deba75-de67-48b4-500e-323d315989c2', short: 'brows',  ui: 'brows',   label: '✨ Брови' },
+  { id: '88deba75-de77-fa8f-57ac-e23d54c5a8fc', short: 'visage', ui: 'brows',   label: '💄 Макіяж' },
+  { id: '88dec3b1-3738-99ff-499c-0c4226c659f1', short: 'body',   ui: 'massage', label: '💆 Body Sculpt' },
+  { id: '88dec3b1-373d-0c5a-5a8d-479b1f45cf16', short: 'flift',  ui: 'massage', label: '💆 Face Lift' },
+];
+const BP_CAT_BY_SHORT = Object.fromEntries(BP_CATEGORIES.map(c => [c.short, c]));
+const SVC_PAGE_SIZE = 8;
+
 // Фото-довідник довжини волосся (окрема кнопка, не в альбомі)
 const HAIR_LENGTH_PHOTO = 'AgACAgQAAxkDAAPLaiTBtXP0jsJy5gKbRElPhB8YYEwAAn4NaxtmQChRjFmstnOiScUBAAMCAAN5AAM7BA';
 
@@ -418,71 +437,124 @@ async function showBookVisit(chatId, userId) {
   });
 }
 
-async function showBookServices(chatId, cat, userId) {
+// Кеш списку послуг для меню (2 хв) — щоб пагінація не смикала BP API на кожен клік
+let bookSvcCache = { ts: 0, arr: [] };
+async function getAllServices() {
+  if (bookSvcCache.arr.length && Date.now() - bookSvcCache.ts < 2 * 60 * 1000) return bookSvcCache.arr;
+  const all = await bp.listServices();
+  const arr = Array.isArray(all) ? all : (all.data || all.items || []);
+  bookSvcCache = { ts: Date.now(), arr };
+  return arr;
+}
+
+function svcCatId(svc) {
+  return typeof svc.category === 'string' ? svc.category : (svc.category && svc.category.id);
+}
+
+// Рівень 1: UI-категорія → підкатегорії BP (майстер/тип) АБО одразу список якщо послуг мало
+async function showBookServices(chatId, cat, userId, messageId) {
   try {
-    const allServices = await bp.listServices();
-    const svcArr = Array.isArray(allServices) ? allServices : (allServices.data || allServices.items || []);
-    // Get masters to determine category mapping
-    const allMasters = await bp.listEmployees();
-    const empArr = Array.isArray(allMasters) ? allMasters : (allMasters.data || allMasters.items || []);
+    const svcArr = await getAllServices();
+    const subs = BP_CATEGORIES.filter(c => c.ui === cat);
+    const subIds = new Set(subs.map(c => c.id));
+    const inCat = svcArr.filter(s => subIds.has(svcCatId(s)));
 
-    // Build service→category mapping (same logic as /services endpoint)
-    const votes = {};
-    for (const m of empArr) {
-      const positions = m.positions || (m.position ? [m.position] : []);
-      const mCat = positions.map(p => POSITION_TO_CATEGORY[p]).find(Boolean);
-      if (!mCat) continue;
-      for (const s of (m.services || [])) {
-        const sid = s.id || s;
-        votes[sid] = votes[sid] || {};
-        votes[sid][mCat] = (votes[sid][mCat] || 0) + 1;
-      }
-    }
-
-    const filtered = svcArr.filter(svc => {
-      const cid = typeof svc.category === 'string' ? svc.category : (svc.category && svc.category.id);
-      if (cid && CATEGORY_OVERRIDE[cid]) return CATEGORY_OVERRIDE[cid] === cat;
-      const v = votes[svc.id];
-      if (!v) return false;
-      const top = Object.entries(v).sort((a,b) => b[1] - a[1])[0];
-      return top && top[0] === cat;
-    });
-
-    if (!filtered.length) {
+    if (!inCat.length) {
       return tg('sendMessage', { chat_id: chatId, text: 'У цій категорії поки немає доступних послуг.',
         reply_markup: { inline_keyboard: [[{ text: '« Назад', callback_data: 'book:start' }]] } });
     }
 
-    // Show services as buttons (max 20) — with cart toggle
-    const cart = (bookingState.get(userId) || {}).cart || [];
-    const cartIds = new Set(cart.map(c => c.id));
-    const buttons = filtered.slice(0, 20).map(s => {
-      const priceVal = s.price && typeof s.price === 'object' ? Object.values(s.price)[0] : s.price;
-      const price = priceVal ? ` ${priceVal}₴` : '';
-      const dur = s.duration ? ` ${s.duration}хв` : '';
-      const inCart = cartIds.has(s.id);
-      const label = `${inCart ? '✓ ' : ''}${s.name} (${dur}${price})`;
-      return [{ text: label.length > 60 ? label.slice(0, 59) + '…' : label, callback_data: `book:add:${cat}:${s.id}` }];
-    });
-    if (cart.length) {
-      const totalDur = cart.reduce((sum, c) => sum + (c.duration || 0), 0);
-      buttons.push([{ text: `🛒 Кошик: ${cart.length} послуг · ${totalDur} хв → Далі`, callback_data: 'book:cart:done' }]);
+    // Мало послуг або одна підкатегорія → одразу список (через першу підкатегорію зі злиттям)
+    if (subs.length === 1 || inCat.length <= 12) {
+      return showSubServices(chatId, `all-${cat}`, 0, userId, messageId);
     }
-    buttons.push([{ text: '« Назад до категорій', callback_data: 'book:start' }]);
 
-    return tg('sendMessage', {
+    // Меню підкатегорій з кількістю послуг
+    const counts = {};
+    for (const s of inCat) counts[svcCatId(s)] = (counts[svcCatId(s)] || 0) + 1;
+    const rows = subs.filter(c => counts[c.id]).map(c => ([{
+      text: `${c.label} · ${counts[c.id]} послуг`, callback_data: `book:sub:${c.short}:0`,
+    }]));
+    rows.push([{ text: '« Назад до категорій', callback_data: 'book:start' }]);
+
+    const payload = {
       chat_id: chatId, parse_mode: 'HTML',
-      text: `<b>${CAT_LABEL[cat] || cat}</b>\n\nНатисніть на послугу — і одразу оберете день та час 👇`,
-      reply_markup: { inline_keyboard: buttons },
-    });
+      text: `<b>${CAT_LABEL[cat] || cat}</b>\n\nОберіть майстра або напрямок 👇`,
+      reply_markup: { inline_keyboard: rows },
+    };
+    if (messageId) return tg('editMessageText', { ...payload, message_id: messageId }).catch(() => tg('sendMessage', payload));
+    return tg('sendMessage', payload);
   } catch (e) {
     console.error('[book:services]', e.message);
     return tg('sendMessage', { chat_id: chatId, text: '❌ Помилка завантаження послуг. Спробуйте пізніше.' });
   }
 }
 
+// Рівень 2: список послуг підкатегорії, сторінками по SVC_PAGE_SIZE, без простирадла
+async function showSubServices(chatId, short, page, userId, messageId) {
+  try {
+    const svcArr = await getAllServices();
+    let ui, title, list;
+    if (short.startsWith('all-')) {
+      ui = short.slice(4);
+      const ids = new Set(BP_CATEGORIES.filter(c => c.ui === ui).map(c => c.id));
+      list = svcArr.filter(s => ids.has(svcCatId(s)));
+      title = CAT_LABEL[ui] || ui;
+    } else {
+      const sub = BP_CAT_BY_SHORT[short];
+      if (!sub) return;
+      ui = sub.ui;
+      list = svcArr.filter(s => svcCatId(s) === sub.id);
+      title = sub.label;
+    }
+    list.sort((a, b) => String(a.name).localeCompare(String(b.name), 'uk'));
+
+    const pages = Math.max(1, Math.ceil(list.length / SVC_PAGE_SIZE));
+    page = Math.min(Math.max(0, page), pages - 1);
+    const slice = list.slice(page * SVC_PAGE_SIZE, (page + 1) * SVC_PAGE_SIZE);
+
+    // Запам'ятати де клієнт — щоб після додавання в кошик повернути на цю ж сторінку
+    const stPrev = bookingState.get(userId) || {};
+    bookingState.set(userId, { ...stPrev, lastSub: short, lastPage: page });
+
+    const cart = (bookingState.get(userId) || {}).cart || [];
+    const cartIds = new Set(cart.map(c => c.id));
+    const rows = slice.map(s => {
+      const priceVal = s.price && typeof s.price === 'object' ? Object.values(s.price)[0] : s.price;
+      const price = priceVal ? ` · ${priceVal}₴` : '';
+      const label = `${cartIds.has(s.id) ? '✓ ' : ''}${s.name}${price}`;
+      return [{ text: label.length > 60 ? label.slice(0, 59) + '…' : label, callback_data: `book:add:${ui}:${s.id}` }];
+    });
+
+    if (pages > 1) {
+      const nav = [];
+      if (page > 0) nav.push({ text: '◀️', callback_data: `book:sub:${short}:${page - 1}` });
+      nav.push({ text: `${page + 1}/${pages}`, callback_data: 'noop' });
+      if (page < pages - 1) nav.push({ text: '▶️', callback_data: `book:sub:${short}:${page + 1}` });
+      rows.push(nav);
+    }
+    if (cart.length) {
+      const totalDur = cart.reduce((sum, c) => sum + (c.duration || 0), 0);
+      rows.push([{ text: `🛒 Кошик: ${cart.length} · ${totalDur} хв → Далі`, callback_data: 'book:cart:done' }]);
+    }
+    const backCb = short.startsWith('all-') ? 'book:start' : `book:cat:${ui}`;
+    rows.push([{ text: '« Назад', callback_data: backCb }]);
+
+    const payload = {
+      chat_id: chatId, parse_mode: 'HTML',
+      text: `<b>${title}</b>\n\nНатисніть на послугу — і одразу оберете день та час 👇`,
+      reply_markup: { inline_keyboard: rows },
+    };
+    if (messageId) return tg('editMessageText', { ...payload, message_id: messageId }).catch(() => tg('sendMessage', payload));
+    return tg('sendMessage', payload);
+  } catch (e) {
+    console.error('[book:sub]', e.message);
+    return tg('sendMessage', { chat_id: chatId, text: '❌ Помилка завантаження послуг. Спробуйте пізніше.' });
+  }
+}
+
 // ── Cart: toggle service in/out ──
-async function toggleCartService(chatId, catKey, svcId, userId) {
+async function toggleCartService(chatId, catKey, svcId, userId, messageId) {
   const services = await getServicesForSearch();
   const svc = services.find(s => s.id === svcId);
   if (!svc) return;
@@ -500,8 +572,9 @@ async function toggleCartService(chatId, catKey, svcId, userId) {
   }
   bookingState.set(userId, state);
 
-  // Re-show category services with updated cart
-  return showBookServices(chatId, catKey, userId);
+  // Re-show the same subcategory page with updated cart (fallback: category menu)
+  if (state.lastSub) return showSubServices(chatId, state.lastSub, state.lastPage || 0, userId, messageId);
+  return showBookServices(chatId, catKey, userId, messageId);
 }
 
 // ── Single service from search → add to cart + go to dates ──
@@ -991,7 +1064,6 @@ async function confirmBooking(chatId, dateKey, time, masterId, userId) {
       `👩 Майстер: <b>${masterName}</b>\n` +
       `⏱ Тривалість: ${duration} хв\n` +
       (state.service.price ? `💰 Вартість: ${state.service.price} грн\n` : '') +
-      (state.service.price ? `💳 Після підтвердження надішлю посилання на передоплату 30%\n` : '') +
       `\nВсе вірно? 👇`,
     reply_markup: {
       inline_keyboard: [
@@ -1239,7 +1311,12 @@ router.post('/telegram', async (req, res) => {
       if (data === 'action:call_admin') return showAdmin(chatId);
       // ── Booking flow callbacks ──
       if (data === 'book:start') return showBookVisit(chatId, cq.from.id);
-      if (data.startsWith('book:cat:')) return showBookServices(chatId, data.slice(9), cq.from.id);
+      if (data === 'noop') return; // пустышка для счётчика страниц
+      if (data.startsWith('book:cat:')) return showBookServices(chatId, data.slice(9), cq.from.id, cq.message && cq.message.message_id);
+      if (data.startsWith('book:sub:')) {
+        const parts = data.split(':'); // book:sub:<short>:<page>
+        return showSubServices(chatId, parts[2], parseInt(parts[3], 10) || 0, cq.from.id, cq.message && cq.message.message_id);
+      }
       if (data.startsWith('book:add:')) {
         // book:add:catKey:serviceId
         const rest = data.slice(9);
@@ -1252,7 +1329,7 @@ router.post('/telegram', async (req, res) => {
           return handleSingleServiceSelect(chatId, svcId, cq.from.id);
         }
         // Кошик уже є (режим «додати ще») → toggle як раніше
-        return toggleCartService(chatId, catKey, svcId, cq.from.id);
+        return toggleCartService(chatId, catKey, svcId, cq.from.id, cq.message && cq.message.message_id);
       }
       if (data === 'book:back-to-services') {
         // «Назад» з екрана дат: прибираємо поточну послугу з кошика і повертаємось до категорій
@@ -1709,11 +1786,14 @@ const POSITION_TO_CATEGORY = {
   '88de9f81-ba86-ef50-2721-6e891694e6c5': 'nails',   // Мастер маникюра
   '88dec3b1-f6dc-b5f0-61c1-6b5a6950e003': 'massage', // Масажист
 };
-// Override по category GUID — для масажу (BODY SCULPT + NATURAL FACE LIFT, створено 06.06)
-const CATEGORY_OVERRIDE = {
-  '88dec3b1-3738-99ff-499c-0c4226c659f1': 'massage', // BODY SCULPT
-  '88dec3b1-373d-0c5a-5a8d-479b1f45cf16': 'massage', // NATURAL FACE LIFT
-};
+// Override по category GUID — ПОВНА карта всіх 12 категорій BP (10.06).
+// Для сайт-віджета: hair/nails/face/massage (вії та брови → face).
+// Раніше тут було тільки 2 масажні категорії, решта йшла через «голоси майстрів»
+// і частина послуг просто не потрапляла нікуди — звідси «не все підтягує».
+const UI_TO_WIDGET = { hair: 'hair', nails: 'nails', lashes: 'face', brows: 'face', massage: 'massage' };
+const CATEGORY_OVERRIDE = Object.fromEntries(
+  BP_CATEGORIES.map(c => [c.id, UI_TO_WIDGET[c.ui] || c.ui])
+);
 
 // Кеш каталогу — щоб віджет не лагав при кожному відкритті (5 хв TTL)
 let svcCache = { ts: 0, body: null };
