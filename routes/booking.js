@@ -15,8 +15,17 @@ const bp = require('../beautyproClient');
 const shop = require('../shop');
 const dbpg = require('../db-pg');
 
+// Канонічний формат телефону = як у CRM-базі та BeautyPro: тільки цифри, '380...'
+function normalizePhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 10 && d.startsWith('0')) d = '38' + d;   // 0958... → 380958...
+  if (d.length === 11 && d.startsWith('80')) d = '3' + d;   // 80958... → 380958...
+  return d;
+}
+
 // upsert клиента в общую CRM-базу; устойчив к конфликту по telegram_id
 async function upsertCrmClient(phone, name, tgUserId) {
+  phone = normalizePhone(phone);
   try {
     const r = await dbpg.query(
       `INSERT INTO clients (phone, name, telegram_id, source)
@@ -168,6 +177,27 @@ const CAT_PRICE_PHOTO = {
 
 // In-memory: tg_user_id → phone (для "Мої записи")
 const userPhones = new Map();
+
+// Телефон клієнта: кеш → CRM-база за telegram_id (переживає рестарти процесу)
+async function getUserPhone(userId) {
+  const cached = userPhones.get(userId);
+  if (cached) return cached;
+  try {
+    const r = await dbpg.query(
+      `SELECT phone FROM clients
+       WHERE telegram_id = $1 AND phone IS NOT NULL AND phone <> ''
+       ORDER BY id DESC LIMIT 1`,
+      [userId]
+    );
+    if (r.rowCount) {
+      userPhones.set(userId, r.rows[0].phone);
+      return r.rows[0].phone;
+    }
+  } catch (e) {
+    console.error('[getUserPhone]', e.message);
+  }
+  return null;
+}
 // In-memory: tg_user_id → { username, first_name, last_name } з метаданих ТГ
 const userMeta = new Map();
 
@@ -823,7 +853,7 @@ async function pickComboSlot(chatId, data, userId) {
   const combo = state.combos[comboIdx];
   if (!combo) return showBookVisit(chatId, userId);
 
-  const phone = userPhones.get(userId);
+  const phone = await getUserPhone(userId);
   if (!phone) {
     state.pendingCombo = comboIdx;
     bookingState.set(userId, state);
@@ -1025,7 +1055,7 @@ async function confirmBooking(chatId, dateKey, time, masterId, userId) {
   const state = bookingState.get(userId);
   if (!state) return showBookVisit(chatId, userId);
 
-  const phone = userPhones.get(userId);
+  const phone = await getUserPhone(userId);
   if (!phone) {
     // Save pending booking data
     state.pendingConfirm = { dateKey, time, masterId };
@@ -1187,7 +1217,7 @@ async function showCategoryServices(chatId, cat, messageId) {
 }
 
 async function showMyAppointments(chatId, tgUserId, firstName) {
-  const phone = userPhones.get(tgUserId);
+  const phone = await getUserPhone(tgUserId);
   if (!phone) {
     return tg('sendMessage', {
       chat_id: chatId,
@@ -1361,7 +1391,7 @@ router.post('/telegram', async (req, res) => {
       if (data.startsWith('book:combo:')) return pickComboSlot(chatId, data, cq.from.id);
       // ── Shop callbacks ──
       if (data.startsWith('shop:')) {
-        const userPhone = userPhones.get(cq.from.id) || null;
+        const userPhone = (await getUserPhone(cq.from.id)) || null;
         return shop.handleCallback(tg, chatId, cq.from.id, data, userPhone, process.env.ADMIN_CHAT_ID || null);
       }
       return;
@@ -1386,7 +1416,7 @@ router.post('/telegram', async (req, res) => {
         if (row.status !== 'pending') return tg('sendMessage', { chat_id: chatId, text: '✓ Цей запис вже підтверджено.' });
         db.update(token, { tg_user_id: msg.from.id });
         // Якщо телефон вже відомий — підтверджуємо одразу без request_contact
-        const knownPhone = userPhones.get(msg.from.id);
+        const knownPhone = await getUserPhone(msg.from.id);
         if (knownPhone) {
           try {
             const client = await bp.createClient({ phone: knownPhone, name: row.client_name || msg.from.first_name });
@@ -1414,14 +1444,15 @@ router.post('/telegram', async (req, res) => {
         });
       }
       // ref_XXX або просто /start без аргументу → меню (з перевіркою phone)
-      if (!userPhones.get(msg.from.id)) return askShareContact(chatId, msg.from.first_name);
+      if (!(await getUserPhone(msg.from.id))) return askShareContact(chatId, msg.from.first_name);
       return showMainMenu(chatId, msg.from.first_name);
     }
 
     // ── /start без аргументу ──────────────────────────
     if (text === '/start' || text === '/menu') {
-      console.log('[/start]', { chatId, userId: msg.from.id, hasPhone: !!userPhones.get(msg.from.id) });
-      if (!userPhones.get(msg.from.id)) {
+      const startPhone = await getUserPhone(msg.from.id);
+      console.log('[/start]', { chatId, userId: msg.from.id, hasPhone: !!startPhone });
+      if (!startPhone) {
         const result = await askShareContact(chatId, msg.from.first_name);
         console.log('[askShareContact result]', JSON.stringify(result));
         return result;
@@ -1433,7 +1464,7 @@ router.post('/telegram', async (req, res) => {
     if (text === '🧚 Адміністратор салону') return showAdmin(chatId);
 
     // ── ЖОРСТКИЙ GATE: до того як поділився номером — нічого не доступне ──
-    if (!userPhones.get(msg.from.id) && !msg.contact) {
+    if (!msg.contact && !(await getUserPhone(msg.from.id))) {
       return askShareContact(chatId, msg.from.first_name);
     }
 
@@ -1460,7 +1491,7 @@ router.post('/telegram', async (req, res) => {
     // ── Successful payment ─────────────────────────────
     if (msg.successful_payment) {
       console.log('[payment] successful_payment received:', JSON.stringify(msg.successful_payment));
-      const savedPhone = userPhones.get(msg.from.id) || null;
+      const savedPhone = (await getUserPhone(msg.from.id)) || null;
       return shop.handleSuccessfulPayment(tg, msg, process.env.ADMIN_CHAT_ID || null, savedPhone);
     }
 
@@ -1469,8 +1500,11 @@ router.post('/telegram', async (req, res) => {
       if (msg.contact.user_id !== msg.from.id) {
         return tg('sendMessage', { chat_id: chatId, text: '❌ Можна поділитись лише власним номером.' });
       }
-      const phone = '+' + msg.contact.phone_number.replace(/\D/g, '');
+      const phone = normalizePhone(msg.contact.phone_number);
       userPhones.set(msg.from.id, phone);
+      // Одразу фіксуємо клієнта в CRM-базі — щоб бот «впізнавав» його після рестартів
+      const contactName = [msg.contact.first_name || msg.from.first_name, msg.contact.last_name].filter(Boolean).join(' ');
+      upsertCrmClient(phone, contactName, msg.from.id).catch(e => console.error('[upsertCrmClient/contact]', e.message));
 
       // Якщо є pending combo booking — виконуємо комплексний запис
       const bState = bookingState.get(msg.from.id);
@@ -1544,7 +1578,7 @@ router.post('/direct', async (req, res) => {
     if (digits.length < 10 || digits.length > 15) {
       return res.status(400).json({ error: 'Невірний номер телефону' });
     }
-    const phone = '+' + digits;
+    const phone = normalizePhone(digits);
     const cleanName = String(name).trim().slice(0, 80);
     if (cleanName.length < 2) {
       return res.status(400).json({ error: 'Введіть імʼя' });
