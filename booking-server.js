@@ -32,7 +32,7 @@ app.use('/shop-assets', express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => res.json({ ok: true, service: 'svs-booking', time: new Date().toISOString() }));
 app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 // alias — ecosystem_health ищет /health
-app.get('/health', (req, res) => res.json({ ok: true, service: 'svs-booking', time: new Date().toISOString() }));
+app.get('/health', (req, res) => res.json({ ok: true, service: 'svs-booking', commit: (process.env.RENDER_GIT_COMMIT || 'local').slice(0, 7), time: new Date().toISOString() }));
 
 app.use('/api/booking', bookingRoutes);
 app.use('/api/admin', require('./routes/admin'));
