@@ -257,7 +257,13 @@ function mainMenuKeyboard() {
   };
 }
 
-async function showMainMenu(chatId, name) {
+async function showMainMenu(chatId, name, userId) {
+  // майстрам — додаткова кнопка кабінету
+  let kb = mainMenuKeyboard();
+  if (userId) {
+    const master = await findMasterByPhone(userId).catch(() => null);
+    if (master) kb = { ...kb, keyboard: [...kb.keyboard, [{ text: '📋 Мій графік' }]] };
+  }
   const text =
     `<b>SVS Beauty Space</b> — салон краси у Сумах 💖\n\n` +
     `Що ми вміємо тут, у боті:\n` +
@@ -273,7 +279,7 @@ async function showMainMenu(chatId, name) {
     chat_id: chatId,
     parse_mode: 'HTML',
     text,
-    reply_markup: mainMenuKeyboard(),
+    reply_markup: kb,
   });
 }
 
@@ -1649,19 +1655,130 @@ async function showMyAppointments(chatId, tgUserId, firstName) {
     const client = await bp.findClientByPhone(phone).catch(() => null);
     if (!client) return tg('sendMessage', { chat_id: chatId, text: 'У CRM не знайдено записів за вашим номером.', reply_markup: mainMenuKeyboard() });
     const cid = client.id || client.client_id;
-    const appts = await bp.raw('GET', `/clients/${cid}/appointments`, { limit: 10 }).catch(() => null);
-    const list = Array.isArray(appts) ? appts : (appts && appts.appointments) || [];
+    const appts = await bp.raw('GET', '/appointments', {
+      client: cid, fields: 'date,state,services(start,service,price)', limit: 50,
+    }).catch(() => null);
+    let list = Array.isArray(appts) ? appts : (appts && appts.appointments) || [];
+    list = list.filter(a => !/cancel/i.test(String(a.state || '')));
     if (!list.length) return tg('sendMessage', { chat_id: chatId, text: 'У вас поки немає записів.', reply_markup: mainMenuKeyboard() });
-    const lines = list.slice(0, 10).map(a => {
-      const dt = (a.date_from || a.start || '').replace('T', ' ').slice(0, 16);
-      const svc = a.service_name || a.service || '';
-      const status = a.status === 'confirmed' || a.status === 'active' ? '✅' : (a.status === 'cancelled' ? '❌' : '⏳');
-      return `${status} <b>${dt}</b> — ${svc}`;
-    });
-    return tg('sendMessage', { chat_id: chatId, parse_mode: 'HTML', text: `<b>📜 Ваші записи</b>\n\n${lines.join('\n')}`, reply_markup: mainMenuKeyboard() });
+
+    // назви послуг — з кешу сервісів
+    const svcArr = await getAllServices().catch(() => []);
+    const svcName = {};
+    svcArr.forEach(s => { svcName[s.id] = s.name; });
+
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const decorate = a => {
+      const sv = Array.isArray(a.services) ? a.services : [];
+      const rawStart = String((sv[0] && sv[0].start) || '');
+      const time = /^\d{2}:\d{2}/.test(rawStart) ? rawStart.slice(0, 5)
+        : (rawStart.includes('T') ? rawStart.slice(11, 16) : '');
+      const dk = String(a.date || rawStart).slice(0, 10);
+      const names = sv.map(x => svcName[x.service] || '').filter(Boolean).join(' + ') || 'Послуга';
+      const total = sv.reduce((s, x) => s + (Number(typeof x.price === 'object' ? Object.values(x.price)[0] : x.price) || 0), 0);
+      return { dk, time, names, total, state: a.state };
+    };
+    const items = list.map(decorate).sort((a, b) => b.dk.localeCompare(a.dk));
+    const future = items.filter(i => i.dk >= todayKey).reverse(); // найближчі спочатку
+    const past = items.filter(i => i.dk < todayKey).slice(0, 5);
+
+    const fmt = i => `${i.dk >= todayKey ? '🟢' : '✔️'} <b>${i.dk.slice(8,10)}.${i.dk.slice(5,7)}${i.time ? ' ' + i.time : ''}</b> — ${i.names}${i.total ? ' · ' + i.total + '₴' : ''}`;
+    let text = '<b>📜 Ваші записи</b>\n';
+    if (future.length) text += '\n<b>Найближчі:</b>\n' + future.slice(0, 5).map(fmt).join('\n') + '\n';
+    if (past.length) text += '\n<b>Минулі:</b>\n' + past.map(fmt).join('\n');
+    if (!future.length && !past.length) text += '\nУ вас поки немає записів.';
+    return tg('sendMessage', { chat_id: chatId, parse_mode: 'HTML', text, reply_markup: mainMenuKeyboard() });
   } catch (e) {
     console.error('[bot/my]', e.message);
     return tg('sendMessage', { chat_id: chatId, text: 'Не вдалось завантажити записи.', reply_markup: mainMenuKeyboard() });
+  }
+}
+
+// ═══ КАБІНЕТ МАЙСТРА ═══════════════════════════════════
+// Розпізнаємо майстра по номеру телефону (матч останніх 10 цифр з BP /employees)
+const masterCache = new Map(); // tg_user_id → { val: {id,name}|null, ts }
+const MASTER_CACHE_TTL = 30 * 60 * 1000;
+
+async function findMasterByPhone(userId) {
+  const hit = masterCache.get(userId);
+  if (hit && Date.now() - hit.ts < MASTER_CACHE_TTL) return hit.val;
+  const phone = await getUserPhone(userId);
+  if (!phone) return null;
+  const last10 = String(phone).replace(/\D/g, '').slice(-10);
+  if (last10.length < 10) return null;
+  let val = null;
+  try {
+    const emps = await bp.raw('GET', '/employees', { fields: 'name,phone', archive: 'false' });
+    const arr = Array.isArray(emps) ? emps : (emps && (emps.data || emps.items)) || [];
+    for (const e of arr) {
+      const phones = Array.isArray(e.phone) ? e.phone : (e.phone ? [e.phone] : []);
+      if (phones.some(p => String(p).replace(/\D/g, '').slice(-10) === last10)) {
+        val = { id: e.id, name: e.name || 'Майстер' };
+        break;
+      }
+    }
+  } catch (e) {
+    console.error('[findMasterByPhone]', e.message);
+    return null; // не кешуємо помилку
+  }
+  masterCache.set(userId, { val, ts: Date.now() });
+  return val;
+}
+
+// Графік майстра: записи на сьогодні + завтра
+async function showMasterSchedule(chatId, userId) {
+  const master = await findMasterByPhone(userId);
+  if (!master) {
+    return tg('sendMessage', { chat_id: chatId, text: 'Кабінет майстра доступний лише співробітникам салону.', reply_markup: mainMenuKeyboard() });
+  }
+  try {
+    const d0 = new Date();
+    const from = d0.toISOString().slice(0, 10);
+    const d2 = new Date(d0.getTime() + 2 * 86400000);
+    const to = d2.toISOString().slice(0, 10);
+    const appts = await bp.raw('GET', '/appointments', {
+      from, to, fields: 'date,state,client(name,phones),services(start,service,duration,professional)', limit: 100,
+    }).catch(() => null);
+    let list = Array.isArray(appts) ? appts : (appts && appts.appointments) || [];
+    list = list.filter(a => !/cancel/i.test(String(a.state || '')));
+
+    // лишаємо записи де хоч одна послуга — у цього майстра
+    const mine = [];
+    for (const a of list) {
+      const sv = (Array.isArray(a.services) ? a.services : []).filter(s => String(s.professional || '') === String(master.id));
+      if (sv.length) mine.push({ ...a, services: sv });
+    }
+
+    const svcArr = await getAllServices().catch(() => []);
+    const svcName = {};
+    svcArr.forEach(s => { svcName[s.id] = s.name; });
+
+    const tomorrowKey = new Date(d0.getTime() + 86400000).toISOString().slice(0, 10);
+    const fmtAppt = a => {
+      const sv = a.services;
+      const rawStart = String((sv[0] && sv[0].start) || '');
+      const time = /^\d{2}:\d{2}/.test(rawStart) ? rawStart.slice(0, 5)
+        : (rawStart.includes('T') ? rawStart.slice(11, 16) : '');
+      const names = sv.map(x => svcName[x.service] || '').filter(Boolean).join(' + ') || 'Послуга';
+      const cl = a.client || {};
+      const clPhone = Array.isArray(cl.phones) && cl.phones[0] ? ` · ${cl.phones[0]}` : '';
+      return `🕐 <b>${time || '—'}</b> ${names}\n     👤 ${cl.name || 'Клієнт'}${clPhone}`;
+    };
+    const byDay = dk => mine
+      .filter(a => String(a.date || '').slice(0, 10) === dk)
+      .sort((a, b) => String((a.services[0] || {}).start || '').localeCompare(String((b.services[0] || {}).start || '')));
+
+    const todayList = byDay(from);
+    const tomorrowList = byDay(tomorrowKey);
+    let text = `<b>📋 Графік — ${master.name}</b>\n`;
+    text += `\n<b>Сьогодні (${from.slice(8, 10)}.${from.slice(5, 7)}):</b>\n`;
+    text += todayList.length ? todayList.map(fmtAppt).join('\n') : 'Записів немає';
+    text += `\n\n<b>Завтра (${tomorrowKey.slice(8, 10)}.${tomorrowKey.slice(5, 7)}):</b>\n`;
+    text += tomorrowList.length ? tomorrowList.map(fmtAppt).join('\n') : 'Записів немає';
+    return tg('sendMessage', { chat_id: chatId, parse_mode: 'HTML', text, reply_markup: mainMenuKeyboard() });
+  } catch (e) {
+    console.error('[bot/master]', e.message);
+    return tg('sendMessage', { chat_id: chatId, text: 'Не вдалось завантажити графік.', reply_markup: mainMenuKeyboard() });
   }
 }
 
@@ -1887,7 +2004,7 @@ router.post('/telegram', async (req, res) => {
       }
       // ref_XXX або просто /start без аргументу → меню (з перевіркою phone)
       if (!(await getUserPhone(msg.from.id))) return askShareContact(chatId, msg.from.first_name);
-      return showMainMenu(chatId, msg.from.first_name);
+      return showMainMenu(chatId, msg.from.first_name, msg.from.id);
     }
 
     // ── /start без аргументу ──────────────────────────
@@ -1899,7 +2016,7 @@ router.post('/telegram', async (req, res) => {
         console.log('[askShareContact result]', JSON.stringify(result));
         return result;
       }
-      return showMainMenu(chatId, msg.from.first_name);
+      return showMainMenu(chatId, msg.from.first_name, msg.from.id);
     }
 
     // ── Адміністратор — доступний без phone gate ──────
@@ -1917,7 +2034,8 @@ router.post('/telegram', async (req, res) => {
     if (text === '📄 Прайс-лист') return showPriceCategories(chatId);
     if (text === '🛍 Магазин косметики') return shop.showShopMain(tg, chatId);
     if (text === '🎁 Отримати знижку') return showDiscount(chatId);
-    if (text === '« Назад') return showMainMenu(chatId, msg.from.first_name);
+    if (text === '📋 Мій графік') return showMasterSchedule(chatId, msg.from.id);
+    if (text === '« Назад') return showMainMenu(chatId, msg.from.first_name, msg.from.id);
 
     // ── Невідомий текст: НЕ вгадуємо по словах — показуємо чітке меню ──
     if (text && !text.startsWith('/') && !msg.contact && !msg.successful_payment) {
@@ -1993,11 +2111,11 @@ router.post('/telegram', async (req, res) => {
         text: `Дякуємо, ${msg.from.first_name || ''}! Ваш номер збережено ✅`,
         reply_markup: mainMenuKeyboard(),
       });
-      return showMainMenu(chatId, msg.from.first_name);
+      return showMainMenu(chatId, msg.from.first_name, msg.from.id);
     }
 
     // ── Fallback ──────────────────────────────────────
-    return showMainMenu(chatId, msg.from.first_name);
+    return showMainMenu(chatId, msg.from.first_name, msg.from.id);
   } catch (e) {
     console.error('[booking/telegram]', e.message);
   }
