@@ -68,3 +68,20 @@ if (fs.existsSync(sslDir + '/key.pem') && fs.existsSync(sslDir + '/cert.pem')) {
 // Спринт 3 — фоновий воркер нагадувань
 try { require('./worker/notifier').start(); }
 catch (e) { console.error('[svs-booking] notifier start:', e.message); }
+
+// Keep-alive: Render free tier засыпает после 15 мин без входящего трафика.
+// Каждые 10 мин пингуем свой публичный URL (входящий запрос = не спим)
+// и shop-api (взаимное пробуждение). Полностью автономно.
+if (process.env.RENDER || process.env.RENDER_EXTERNAL_URL) {
+  const KEEPALIVE_URLS = [
+    process.env.RENDER_EXTERNAL_URL || 'https://svs-booking-api.onrender.com',
+    'https://svs-shop-api.onrender.com',
+  ];
+  setInterval(() => {
+    for (const base of KEEPALIVE_URLS) {
+      fetch(base.replace(/\/$/, '') + '/health', { signal: AbortSignal.timeout(60000) })
+        .catch(() => {}); // молча — это просто пинг
+    }
+  }, 10 * 60 * 1000).unref();
+  console.log('[svs-booking] keep-alive pings enabled (10 min)');
+}
