@@ -1770,10 +1770,14 @@ async function showMasterSchedule(chatId, userId) {
 
     const todayList = byDay(from);
     const tomorrowList = byDay(tomorrowKey);
+    const WD = ['Нд', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+    const wdToday = WD[new Date(from).getDay()];
+    const wdTomorrow = WD[new Date(tomorrowKey).getDay()];
+    const plural = n => (n % 10 === 1 && n % 100 !== 11) ? 'запис' : ((n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)) ? 'записи' : 'записів');
     let text = `<b>📋 Графік — ${master.name}</b>\n`;
-    text += `\n<b>Сьогодні (${from.slice(8, 10)}.${from.slice(5, 7)}):</b>\n`;
+    text += `\n<b>Сьогодні · ${wdToday} (${from.slice(8, 10)}.${from.slice(5, 7)}) — ${todayList.length} ${plural(todayList.length)}:</b>\n`;
     text += todayList.length ? todayList.map(fmtAppt).join('\n') : 'Записів немає';
-    text += `\n\n<b>Завтра (${tomorrowKey.slice(8, 10)}.${tomorrowKey.slice(5, 7)}):</b>\n`;
+    text += `\n\n<b>Завтра · ${wdTomorrow} (${tomorrowKey.slice(8, 10)}.${tomorrowKey.slice(5, 7)}) — ${tomorrowList.length} ${plural(tomorrowList.length)}:</b>\n`;
     text += tomorrowList.length ? tomorrowList.map(fmtAppt).join('\n') : 'Записів немає';
     return tg('sendMessage', { chat_id: chatId, parse_mode: 'HTML', text, reply_markup: mainMenuKeyboard() });
   } catch (e) {
