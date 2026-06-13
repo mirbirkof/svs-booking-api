@@ -17,9 +17,25 @@ const { query } = require('../db-pg');
 const router = express.Router();
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const RELAY_SECRET = process.env.INTERNAL_RELAY_SECRET || '';
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 5;
 const rateMap = new Map(); // phone → [timestamps]
+
+// Shared-secret между shop-api и booking-api. Без него любой, кто знает телефон
+// зарегистрированного юзера, мог слать ему текст в Telegram от имени салона (фишинг).
+// Если секрет задан в env обоих сервисов — заголовок обязателен; иначе работаем как раньше
+// (чтобы не оборвать доставку OTP до проставления env на Render) и предупреждаем в логах.
+function requireRelaySecret(req, res, next) {
+  if (RELAY_SECRET) {
+    if (req.headers['x-internal-token'] !== RELAY_SECRET) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+  } else {
+    console.warn('[internal] INTERNAL_RELAY_SECRET не задан — релай ОТКРЫТ. Пропиши секрет на shop-api и booking-api.');
+  }
+  next();
+}
 
 function checkRate(key) {
   const now = Date.now();
@@ -48,7 +64,7 @@ async function tgSend(chatId, text) {
 
 // POST /api/internal/tg-send-by-phone { phone, text }
 // Только для зарегистрированных юзеров. Шлёт в их telegram_id.
-router.post('/tg-send-by-phone', async (req, res) => {
+router.post('/tg-send-by-phone', requireRelaySecret, async (req, res) => {
   try {
     const phone = normalizePhone(req.body?.phone);
     const text = String(req.body?.text || '').slice(0, 4000);
