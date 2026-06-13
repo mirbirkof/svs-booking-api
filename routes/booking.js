@@ -16,6 +16,18 @@ const shop = require('../shop');
 const dbpg = require('../db-pg');
 
 // Канонічний формат телефону = як у CRM-базі та BeautyPro: тільки цифри, '380...'
+// Текущая дата/время салона по Europe/Kyiv (сервер на Render в UTC).
+// Возвращает { date:'YYYY-MM-DD', hhmm:'HH:MM' } — для отсечения брони в прошлом.
+function kyivNow() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Kiev',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, hhmm: `${p.hour}:${p.minute}` };
+}
+
 function normalizePhone(raw) {
   let d = String(raw || '').replace(/\D/g, '');
   if (d.length === 10 && d.startsWith('0')) d = '38' + d;   // 0958... → 380958...
@@ -2148,6 +2160,18 @@ router.post('/direct', async (req, res) => {
       return res.status(400).json({ error: 'Введіть імʼя' });
     }
 
+    // Запис лише у майбутнє: date_from приходить як локальний київський час (як віддає /slots),
+    // тому порівнюємо нaівно з поточним київським часом.
+    if (isNaN(Date.parse(date_from))) {
+      return res.status(400).json({ error: 'Невірна дата запису' });
+    }
+    {
+      const now = kyivNow();
+      if (String(date_from).slice(0, 16) < `${now.date}T${now.hhmm}`) {
+        return res.status(400).json({ error: 'Не можна записатися на час, що вже минув' });
+      }
+    }
+
     // Blacklist check
     if (await db.isBlacklisted(phone)) {
       return res.status(403).json({ error: 'Онлайн-запис недоступний. Зателефонуйте салону.' });
@@ -2688,6 +2712,19 @@ router.get('/slots', async (req, res) => {
     if (!service_id || !date) {
       return res.status(400).json({ error: 'service_id + date обовʼязкові' });
     }
+    // валидация формата и реальности даты (раньше мусор вроде 'tomorrow'/'2026-13-45' пролетал)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date має бути у форматі YYYY-MM-DD' });
+    }
+    const [vy, vm, vd] = date.split('-').map(Number);
+    const probe = new Date(Date.UTC(vy, vm - 1, vd));
+    if (probe.getUTCFullYear() !== vy || probe.getUTCMonth() !== vm - 1 || probe.getUTCDate() !== vd) {
+      return res.status(400).json({ error: 'невалідна дата' });
+    }
+    // прошедшая дата — записываться некуда (сравнение по Europe/Kyiv, сервер в UTC)
+    const now = kyivNow();
+    if (date < now.date) return res.json([]);
+
     const services = await bp.listServices();
     const svc = services.find(s => s.id === service_id);
     if (!svc) return res.status(404).json({ error: 'service not found' });
@@ -2736,7 +2773,9 @@ router.get('/slots', async (req, res) => {
       });
     }
 
-    const out = Object.values(byTime).sort((a, b) => a.time.localeCompare(b.time));
+    let out = Object.values(byTime).sort((a, b) => a.time.localeCompare(b.time));
+    // на сегодня прятать уже прошедшее время (клиент не должен записаться в прошлое)
+    if (date === now.date) out = out.filter(s => s.time > now.hhmm);
     res.json(out);
   } catch (e) {
     console.error('[booking/slots]', e.message);
