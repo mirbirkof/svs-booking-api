@@ -2472,8 +2472,13 @@ router.get('/masters', async (req, res) => {
 async function mastersForService(service_id) {
   const all = await bp.listEmployees();
   const list = Array.isArray(all) ? all : (all.data || all.items || []);
-  const filtered = list.filter(m => Array.isArray(m.services) && m.services.some(x => (x.id || x) === service_id));
-  return filtered.length ? filtered : list;
+  // Реальные мастера = те, у кого вообще есть услуги. Админ-аккаунты услуг не имеют.
+  const bookable = list.filter(m => Array.isArray(m.services) && m.services.length > 0);
+  const filtered = bookable.filter(m => m.services.some(x => (x.id || x) === service_id));
+  // Фолбэк (у услуги нет явно привязанных мастеров): показываем всех РЕАЛЬНЫХ мастеров,
+  // но НЕ админ-аккаунты. Раньше возвращался весь список employees → клиент мог
+  // записаться к «Admin Admin» как к мастеру.
+  return filtered.length ? filtered : bookable;
 }
 
 // === Helper: побудувати слоти з /schedule (одне звернення на весь період) ===
