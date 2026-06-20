@@ -59,17 +59,80 @@ async function upsertCrmClient(phone, name, tgUserId) {
   }
 }
 
-// In-memory pending bookings (MVP — replace with SQLite later)
+// Pending bookings — Postgres (переживає сон/рестарт dyno на Render).
+// Схема спільна з CRM (migration 003_booking_pending): created_at/verified_at = TIMESTAMPTZ,
+// tenant_id заповнюється дефолтом current_tenant_id(). store = write-through кеш +
+// fallback, якщо DATABASE_URL не заданий або БД тимчасово недоступна.
 const store = new Map();
+let schemaReady = null;
+async function ensurePendingSchema() {
+  if (!dbpg.isEnabled()) return false;
+  if (schemaReady) return schemaReady;
+  schemaReady = dbpg.query(`
+    CREATE TABLE IF NOT EXISTS booking_pending (
+      token         TEXT PRIMARY KEY,
+      service_id    TEXT NOT NULL,
+      employee_id   TEXT NOT NULL,
+      date_from     TEXT NOT NULL,
+      date_to       TEXT NOT NULL,
+      client_name   TEXT,
+      channel       TEXT DEFAULT 'site_salon',
+      tg_user_id    BIGINT,
+      phone         TEXT,
+      status        TEXT NOT NULL DEFAULT 'pending',
+      appointment_id TEXT,
+      error         TEXT,
+      verified_at   TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`)
+    .then(() => dbpg.query('CREATE INDEX IF NOT EXISTS idx_booking_pending_tg ON booking_pending (tg_user_id, status)'))
+    .then(() => true)
+    .catch((e) => { console.error('[booking_pending schema]', e.message); schemaReady = null; return false; });
+  return schemaReady;
+}
+
+// Колонки, які дозволено оновлювати через update()
+const PENDING_UPDATE_COLS = ['status', 'phone', 'appointment_id', 'error', 'client_name', 'verified_at', 'tg_user_id'];
+
 const db = {
-  insert(token, row) { store.set(token, { ...row, status: 'pending', created_at: Date.now() }); },
-  get(token) { return store.get(token) || null; },
-  byTgUser(uid) {
-    const list = [...store.values()].filter(r => r.tg_user_id === uid && r.status === 'pending');
-    return list.sort((a,b)=>b.created_at-a.created_at)[0] || null;
+  async insert(token, row) {
+    store.set(token, { ...row, status: 'pending', created_at: Date.now() });
+    if (await ensurePendingSchema()) {
+      await dbpg.query(
+        `INSERT INTO booking_pending (token, service_id, employee_id, date_from, date_to, client_name, channel)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (token) DO NOTHING`,
+        [token, row.service_id, row.employee_id, row.date_from, row.date_to, row.client_name || null, row.channel || 'site_salon'],
+      ).catch((e) => console.error('[booking_pending insert]', e.message));
+    }
   },
-  update(token, patch) {
-    const r = store.get(token); if (!r) return; Object.assign(r, patch); store.set(token, r);
+  async get(token) {
+    if (await ensurePendingSchema()) {
+      const r = await dbpg.query('SELECT * FROM booking_pending WHERE token=$1', [token])
+        .catch((e) => { console.error('[booking_pending get]', e.message); return null; });
+      if (r && r.rows[0]) { store.set(token, r.rows[0]); return r.rows[0]; }
+      if (r) return store.get(token) || null; // БД відповіла, запису немає
+    }
+    return store.get(token) || null;
+  },
+  async byTgUser(uid) {
+    if (await ensurePendingSchema()) {
+      const r = await dbpg.query(
+        "SELECT * FROM booking_pending WHERE tg_user_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1", [uid])
+        .catch((e) => { console.error('[booking_pending byTgUser]', e.message); return null; });
+      if (r) return r.rows[0] || null;
+    }
+    const list = [...store.values()].filter((r) => r.tg_user_id === uid && r.status === 'pending');
+    return list.sort((a, b) => b.created_at - a.created_at)[0] || null;
+  },
+  async update(token, patch) {
+    const cur = store.get(token); if (cur) { Object.assign(cur, patch); store.set(token, cur); }
+    if (await ensurePendingSchema()) {
+      const cols = Object.keys(patch).filter((c) => PENDING_UPDATE_COLS.includes(c));
+      if (!cols.length) return;
+      const set = cols.map((c, i) => `${c}=$${i + 2}`).join(', ');
+      await dbpg.query(`UPDATE booking_pending SET ${set} WHERE token=$1`, [token, ...cols.map((c) => patch[c])])
+        .catch((e) => console.error('[booking_pending update]', e.message));
+    }
   },
 };
 
@@ -103,14 +166,14 @@ function tg(method, body) {
 // In-memory schema — no init needed
 
 // === POST /init =========================================
-router.post('/init', (req, res) => {
+router.post('/init', async (req, res) => {
   try {
     const { service_id, employee_id, date_from, date_to, client_name } = req.body;
     if (!service_id || !employee_id || !date_from || !date_to) {
       return res.status(400).json({ error: 'service_id, employee_id, date_from, date_to обовʼязкові' });
     }
     const token = genToken();
-    db.insert(token, { token, service_id, employee_id, date_from, date_to, client_name: client_name || null });
+    await db.insert(token, { token, service_id, employee_id, date_from, date_to, client_name: client_name || null });
 
     res.json({
       ok: true,
@@ -124,8 +187,8 @@ router.post('/init', (req, res) => {
 });
 
 // === GET /status/:token =================================
-router.get('/status/:token', (req, res) => {
-  const row = db.get(req.params.token);
+router.get('/status/:token', async (req, res) => {
+  const row = await db.get(req.params.token);
   if (!row) return res.status(404).json({ error: 'Not found' });
   res.json({ status: row.status, appointment_id: row.appointment_id || null, error: row.error || null });
 });
@@ -1989,10 +2052,10 @@ router.post('/telegram', async (req, res) => {
     if (text.startsWith('/start ')) {
       const token = text.split(' ')[1];
       if (token && !token.startsWith('ref_')) {
-        const row = db.get(token);
+        const row = await db.get(token);
         if (!row) return tg('sendMessage', { chat_id: chatId, text: '⌛ Запис застарів. Поверніться на сайт і почніть знову.' });
         if (row.status !== 'pending') return tg('sendMessage', { chat_id: chatId, text: '✓ Цей запис вже підтверджено.' });
-        db.update(token, { tg_user_id: msg.from.id });
+        await db.update(token, { tg_user_id: msg.from.id });
         // Якщо телефон вже відомий — підтверджуємо одразу без request_contact
         const knownPhone = await getUserPhone(msg.from.id);
         if (knownPhone) {
@@ -2005,7 +2068,7 @@ router.post('/telegram', async (req, res) => {
               date_from: row.date_from,
               date_to: row.date_to,
             });
-            db.update(token, { status: 'confirmed', phone: knownPhone, appointment_id: String(appt.id || appt.appointment_id || ''), verified_at: Date.now() });
+            await db.update(token, { status: 'confirmed', phone: knownPhone, appointment_id: String(appt.id || appt.appointment_id || ''), verified_at: new Date().toISOString() });
             return tg('sendMessage', { chat_id: chatId, text: '✅ Запис підтверджено! Чекаємо вас у салоні.', reply_markup: mainMenuKeyboard() });
           } catch (e) {
             console.error('[booking/bp-push-known]', e.message);
@@ -2093,8 +2156,8 @@ router.post('/telegram', async (req, res) => {
         return confirmBooking(chatId, dateKey, time, masterId, msg.from.id);
       }
 
-      // Якщо є pending booking (старий in-memory) — підтверджуємо
-      const row = db.byTgUser(msg.from.id);
+      // Якщо є pending booking — підтверджуємо
+      const row = await db.byTgUser(msg.from.id);
       if (row) {
         try {
           const client = await bp.createClient({ phone, name: row.client_name || msg.from.first_name });
@@ -2105,7 +2168,7 @@ router.post('/telegram', async (req, res) => {
             date_from: row.date_from,
             date_to: row.date_to,
           });
-          db.update(row.token, { status: 'confirmed', phone, appointment_id: String(appt.id || appt.appointment_id || ''), verified_at: Date.now() });
+          await db.update(row.token, { status: 'confirmed', phone, appointment_id: String(appt.id || appt.appointment_id || ''), verified_at: new Date().toISOString() });
           return tg('sendMessage', {
             chat_id: chatId,
             text: '✅ Запис підтверджено! Чекаємо вас у салоні.',
@@ -2113,7 +2176,7 @@ router.post('/telegram', async (req, res) => {
           });
         } catch (e) {
           console.error('[booking/bp-push]', e.message);
-          db.update(row.token, { status: 'failed', error: e.message.slice(0, 200) });
+          await db.update(row.token, { status: 'failed', error: e.message.slice(0, 200) });
           return tg('sendMessage', { chat_id: chatId, text: '⚠️ Не вдалось зберегти запис у CRM. Адміністратор звʼяжеться з вами.', reply_markup: mainMenuKeyboard() });
         }
       }
