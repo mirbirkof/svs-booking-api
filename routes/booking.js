@@ -2480,10 +2480,14 @@ async function mastersForService(service_id) {
 
 // === Helper: побудувати слоти з /schedule (одне звернення на весь період) ===
 // Логіка: /schedule повертає worktime+appointments по всіх майстрах одразу.
-// Для майстрів без worktime — дефолт 09:00-19:00 (як CRM UI показує).
+// Робочі години салону (джерело правди: app_settings.salon_profile.hours = "Пн-Нд 8:00-19:00").
+// Онлайн-запис можлива ЛИШЕ в межах цих годин — щоб не було розбіжності з графіком салону (заметка #51).
+const SALON_OPEN = 8 * 60;           // 08:00
+const SALON_CLOSE = 19 * 60;         // 19:00
+// Для майстрів без worktime — дефолт = години салону.
 // Дати в API марковані Z, але CRM пише локальний час → читаємо як локальний.
-const DEFAULT_WORK_START = 9 * 60;   // 09:00 в хвилинах
-const DEFAULT_WORK_END = 19 * 60;    // 19:00
+const DEFAULT_WORK_START = SALON_OPEN;   // 08:00 в хвилинах
+const DEFAULT_WORK_END = SALON_CLOSE;    // 19:00
 const STEP_MINUTES = 15;
 
 function parseHM(iso) {
@@ -2557,6 +2561,11 @@ async function buildAvailabilityFromSchedule({ duration, masterIds, dateKeys, lo
         if (hasOtherDays) continue; // майстер має реальний графік, цього дня не працює
         windows = [{ start: DEFAULT_WORK_START, end: DEFAULT_WORK_END }];
       }
+      // Обрізаємо будь-яке вікно графіка межами годин салону (08:00–19:00),
+      // щоб онлайн ніколи не пропонував час поза роботою салону (заметка #51).
+      windows = windows
+        .map(w => ({ start: Math.max(w.start, SALON_OPEN), end: Math.min(w.end, SALON_CLOSE) }))
+        .filter(w => w.end > w.start);
       // Вирізаємо зайняті
       const busy = [...(busyIdx[key] || []), ...(reservesIdx[key] || [])];
       for (const b of busy) windows = subtractInterval(windows, b.start, b.end);
