@@ -112,7 +112,7 @@ async function createClient({ phone, name, email }) {
 //   services = [{ service, employee, start: 'YYYY-MM-DDTHH:MM:SS', duration }]
 // Старый интерфейс booking-server передаёт date_from / date_to (ISO datetime).
 // Внутри конвертируем в date + start + duration_minutes.
-async function createAppointment({ client_id, service_id, employee_id, date_from, date_to, location_id, note }) {
+async function createAppointment({ client_id, service_id, employee_id, date_from, date_to, location_id, note, comments }) {
   const token = await getToken();
   const dt = new Date(date_from);
   const dtEnd = new Date(date_to);
@@ -125,16 +125,21 @@ async function createAppointment({ client_id, service_id, employee_id, date_from
   const duration = Math.max(15, Math.round((dtEnd - dt) / 60000));
   // Назначение мастера идёт через `professional`, а не `employee`
   // (employee — служебное поле BP, возвращается null).
-  const fields = 'date,client,location,state,services(start,service,professional,duration)';
+  // Комментарий записи (видит админ при обзвоне) сохраняется в `groupComments[].text`.
+  // Топ-уровневый `comments` BP молча игнорирует на запись (verified 2026-06-20).
+  // Рабочий механизм — массив groupComments с подполем text (verified 2026-06-20).
+  const fields = 'date,client,location,state,groupComments(text),services(start,service,professional,duration)';
+  const commentText = (comments != null ? comments : note);
+  const body = {
+    client: client_id,
+    location: location_id || LOCATION,
+    date: dateOnly,
+    services: [{ service: service_id, professional: employee_id, start: startIso, duration }],
+  };
+  if (commentText) body.groupComments = [{ text: String(commentText).slice(0, 1000) }];
   return request('POST', '/appointments', {
     token,
-    body: {
-      client: client_id,
-      location: location_id || LOCATION,
-      date: dateOnly,
-      services: [{ service: service_id, professional: employee_id, start: startIso, duration }],
-      // 'note' BP больше не принимает на верхнем уровне
-    },
+    body,
     query: { force: 'true', fields },
   });
 }

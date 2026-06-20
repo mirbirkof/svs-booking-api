@@ -915,7 +915,7 @@ async function executeBookingV2(chatId, userId) {
       const dateTo = `${st.date}T${endTime}:00`;
       const appt = await bp.createAppointment({
         client_id: clientId, service_id: v.id, employee_id: st.execMasterId,
-        date_from: dateFrom, date_to: dateTo, note: 'Запис через Telegram-бот',
+        date_from: dateFrom, date_to: dateTo, comments: buildVisitComment(st.wishes),
       });
       const apptId = String(appt.id || appt.appointment_id || '');
       booked.push({ ...v, time: cursor, apptId, dateFrom, dateTo });
@@ -1605,6 +1605,26 @@ async function confirmBooking(chatId, dateKey, time, masterId, userId) {
   });
 }
 
+// Текст коментаря до запису: джерело + побажання клієнта (бачить адмін при обзвоні).
+function buildVisitComment(wishes) {
+  const w = String(wishes || '').trim();
+  return w ? `Запис через Telegram-бот. Побажання клієнта: ${w}` : 'Запис через Telegram-бот';
+}
+
+// Питаємо додаткові побажання перед фінальним створенням запису.
+// mode: 'main' → executeBooking, 'v2' → executeBookingV2
+async function askWishes(chatId, userId, mode) {
+  const st = bookingState.get(userId);
+  if (!st) return mode === 'v2' ? executeBookingV2(chatId, userId) : executeBooking(chatId, userId);
+  st.awaitingWishes = mode;
+  bookingState.set(userId, st);
+  return tg('sendMessage', {
+    chat_id: chatId, parse_mode: 'HTML',
+    text: '💬 Чи є додаткові побажання до запису?\n<i>(алергії, побажання щодо майстра, кольору тощо)</i>\n\nНапишіть повідомленням або натисніть «Пропустити».',
+    reply_markup: { inline_keyboard: [[{ text: '⏭ Пропустити', callback_data: 'book:wishes:skip' }]] },
+  });
+}
+
 async function executeBooking(chatId, userId) {
   const state = bookingState.get(userId);
   if (!state || !state.confirm) return showBookVisit(chatId, userId);
@@ -1621,7 +1641,7 @@ async function executeBooking(chatId, userId) {
       employee_id: masterId,
       date_from: dateFrom,
       date_to: dateTo,
-      note: 'Запис через Telegram-бот',
+      comments: buildVisitComment(state.wishes),
     });
 
     const appointmentId = String(appt.id || appt.appointment_id || '');
@@ -1983,7 +2003,7 @@ router.post('/telegram', async (req, res) => {
         return showTimesV2(chatId, cq.from.id);
       }
       if (data.startsWith('book:time:')) return showSummaryV2(chatId, data.slice(10), cq.from.id);
-      if (data === 'book:go') return executeBookingV2(chatId, cq.from.id);
+      if (data === 'book:go') return askWishes(chatId, cq.from.id, 'v2');
       if (data.startsWith('book:sub:')) {
         const parts = data.split(':'); // book:sub:<short>:<page>
         return showSubServices(chatId, parts[2], parseInt(parts[3], 10) || 0, cq.from.id, cq.message && cq.message.message_id);
@@ -2028,7 +2048,13 @@ router.post('/telegram', async (req, res) => {
         await tg('sendMessage', { chat_id: chatId, text: 'Запис скасовано. Нічого не записано 👌' });
         return showMainMenu(chatId, cq.from.first_name);
       }
-      if (data === 'book:confirm:yes') return executeBooking(chatId, cq.from.id);
+      if (data === 'book:confirm:yes') return askWishes(chatId, cq.from.id, 'main');
+      if (data === 'book:wishes:skip') {
+        const stW = bookingState.get(cq.from.id);
+        const mode = stW && stW.awaitingWishes;
+        if (stW) { delete stW.awaitingWishes; bookingState.set(cq.from.id, stW); }
+        return mode === 'v2' ? executeBookingV2(chatId, cq.from.id) : executeBooking(chatId, cq.from.id);
+      }
       if (data.startsWith('book:combo:')) return pickComboSlot(chatId, data, cq.from.id);
       // ── Shop callbacks ──
       if (data.startsWith('shop:')) {
@@ -2118,6 +2144,18 @@ router.post('/telegram', async (req, res) => {
     if (text === '🎁 Отримати знижку') return showDiscount(chatId);
     if (text === '📋 Мій графік') return showMasterSchedule(chatId, msg.from.id);
     if (text === '« Назад') return showMainMenu(chatId, msg.from.first_name, msg.from.id);
+
+    // ── Побажання до запису (після підтвердження, перед створенням) ──
+    {
+      const stW = bookingState.get(msg.from.id);
+      if (stW && stW.awaitingWishes && text && !text.startsWith('/') && !msg.contact && !msg.successful_payment) {
+        const mode = stW.awaitingWishes;
+        stW.wishes = text.slice(0, 500);
+        delete stW.awaitingWishes;
+        bookingState.set(msg.from.id, stW);
+        return mode === 'v2' ? executeBookingV2(chatId, msg.from.id) : executeBooking(chatId, msg.from.id);
+      }
+    }
 
     // ── Вільний текст послуги: бот сам шукає послугу за назвою ──
     if (text && !text.startsWith('/') && !msg.contact && !msg.successful_payment) {
