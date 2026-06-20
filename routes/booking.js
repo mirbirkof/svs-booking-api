@@ -425,7 +425,7 @@ async function handleFreeTextSearch(chatId, text, userId) {
         text: `🤔 Не знайшла "<b>${text}</b>".\n\nСпробуйте іншими словами, наприклад:\n• <i>манікюр</i>\n• <i>нарощування вій</i>\n• <i>стрижка</i>\n\nАбо оберіть з категорій 👇`,
         reply_markup: { inline_keyboard: [
           [{ text: '🗓 Обрати з категорій', callback_data: 'book:start' }],
-          [{ text: '📄 Прайс-лист', callback_data: 'price:start' }],
+          [{ text: '📄 Прайс-лист', callback_data: 'menu:price' }],
         ]},
       });
     }
@@ -2053,15 +2053,9 @@ router.post('/telegram', async (req, res) => {
     if (text === '📋 Мій графік') return showMasterSchedule(chatId, msg.from.id);
     if (text === '« Назад') return showMainMenu(chatId, msg.from.first_name, msg.from.id);
 
-    // ── Невідомий текст: НЕ вгадуємо по словах — показуємо чітке меню ──
+    // ── Вільний текст послуги: бот сам шукає послугу за назвою ──
     if (text && !text.startsWith('/') && !msg.contact && !msg.successful_payment) {
-      await tg('sendMessage', {
-        chat_id: chatId,
-        parse_mode: 'HTML',
-        text: 'Я працюю кнопками, так простіше і без помилок 🙂\nОберіть дію в меню нижче 👇',
-        reply_markup: mainMenuKeyboard(),
-      });
-      return;
+      return handleFreeTextSearch(chatId, text, msg.from.id);
     }
 
     // ── Successful payment ─────────────────────────────
