@@ -278,6 +278,7 @@ async function showMainMenu(chatId, name, userId) {
   }
   const text =
     `<b>SVS Beauty Space</b> — салон краси у Сумах 💖\n\n` +
+    `💡 <b>Найшвидше:</b> просто напишіть назву процедури (напр. «манікюр») — і я підберу майстра та вільний час.\n\n` +
     `Що ми вміємо тут, у боті:\n` +
     `🗓 Записатись онлайн до майстра за пару кліків\n` +
     `📄 Подивитись прайс по категоріях\n` +
@@ -475,7 +476,9 @@ async function showBookVisit(chatId, userId) {
     catRows.push([{ text: `✅ Далі — підібрати дату (${cart.length} послуг)`, callback_data: 'book:cart:done' }]);
     catRows.push([{ text: '🗑 Очистити кошик', callback_data: 'book:cart:clear' }]);
   } else {
-    text += 'Оберіть категорію 👇';
+    text += '✍️ <b>Напишіть назву процедури</b> — я одразу знайду:\n'
+      + '<i>наприклад «манікюр», «стрижка», «нарощування вій»</i>\n\n'
+      + 'або оберіть категорію 👇';
   }
   catRows.push([{ text: '« Назад', callback_data: 'menu:main' }]);
 
