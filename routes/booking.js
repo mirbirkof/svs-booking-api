@@ -136,6 +136,20 @@ const db = {
   },
 };
 
+// Neon serverless авто-засинає після паузи → перший запит після сну може впасти
+// (connection error ловиться в .catch і db.get повертає null) або потрапити в порожній
+// кеш свіжого процесу. Це давало хибне «Запис застарів» при першому кліку по deep-link,
+// а повторний /start вже працював (БД встигла прокинутись). Повторюємо читання кілька
+// разів із паузою, щоб дати Neon прокинутись, перш ніж казати що запис застарів.
+async function getPendingWithWake(token, tries = 5, delayMs = 800) {
+  for (let i = 0; i < tries; i++) {
+    const row = await db.get(token);
+    if (row) return row;
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return null;
+}
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || 'Svs_beautybot';
 
@@ -2078,7 +2092,7 @@ router.post('/telegram', async (req, res) => {
     if (text.startsWith('/start ')) {
       const token = text.split(' ')[1];
       if (token && !token.startsWith('ref_')) {
-        const row = await db.get(token);
+        const row = await getPendingWithWake(token);
         if (!row) return tg('sendMessage', { chat_id: chatId, text: '⌛ Запис застарів. Поверніться на сайт і почніть знову.' });
         if (row.status !== 'pending') return tg('sendMessage', { chat_id: chatId, text: '✓ Цей запис вже підтверджено.' });
         await db.update(token, { tg_user_id: msg.from.id });
