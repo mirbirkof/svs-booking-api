@@ -944,9 +944,9 @@ async function executeBookingV2(chatId, userId) {
           await dbpg.query(
             `INSERT INTO online_bookings
               (client_id, client_phone, client_name, service_id, master_id,
-               date_from, date_to, channel, bp_appointment_id, status, telegram_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'bot',$8,'confirmed',$9)`,
-            [crmClientId, phone, clientName || null, String(b.id), String(st.execMasterId), b.dateFrom, b.dateTo, b.apptId, userId]
+               date_from, date_to, channel, bp_appointment_id, status, telegram_id, note)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'bot',$8,'confirmed',$9,$10)`,
+            [crmClientId, phone, clientName || null, String(b.id), String(st.execMasterId), b.dateFrom, b.dateTo, b.apptId, userId, st.wishes || null]
           );
         }
       } catch (logErr) { console.error('[bookv2:ob-log]', logErr.message); }
@@ -1667,10 +1667,10 @@ async function executeBooking(chatId, userId) {
         await dbpg.query(
           `INSERT INTO online_bookings
             (client_id, client_phone, client_name, service_id, master_id,
-             date_from, date_to, channel, bp_appointment_id, status, telegram_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'bot',$8,'confirmed',$9)`,
+             date_from, date_to, channel, bp_appointment_id, status, telegram_id, note)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'bot',$8,'confirmed',$9,$10)`,
           [clientId, phone, clientName || null, String(state.serviceId),
-           String(masterId), dateFrom, dateTo, appointmentId, userId]
+           String(masterId), dateFrom, dateTo, appointmentId, userId, state.wishes || null]
         );
       } catch (logErr) {
         console.error('[book:ob-log]', logErr.message);
